@@ -9,13 +9,20 @@ Personal plugin marketplace for [Claude Code](https://claude.ai/code).
 Reviews recently changed code and harmonizes it with the patterns, conventions, and style of the surrounding codebase. Ensures new code looks like it was written by the same team that wrote the rest of the repo.
 
 **How it works:**
-1. Identifies changed files via `git diff`
-2. Reads 3-5 sibling files to discover established conventions (naming, structure, error handling, imports, etc.)
-3. Checks CLAUDE.md for explicit conventions (which always take precedence)
-4. Applies targeted edits to align divergent code with surrounding patterns
-5. Skips ambiguous cases — when the codebase itself is inconsistent, it does nothing
+1. Identifies changed code via `git diff` (unstaged, staged, or last commit) and reads both the full files and the diffs to know exactly which sections are new or modified
+2. Reads 3-5 sibling files and imported dependencies to discover established conventions (naming, structure, error handling, control flow, imports, comments, type annotations, testing patterns)
+3. Checks CLAUDE.md for explicit conventions (which always take precedence over observed patterns)
+4. Flags only clear divergences where 3+ surrounding files agree on a pattern and the changed code deviates — skips ambiguous cases where the codebase itself is inconsistent
+5. Runs safety checks before each edit (see below)
+6. Applies targeted, minimal edits to only the divergent sections
+7. Summarizes: files modified, patterns addressed, and any divergences intentionally skipped with reasons
 
-**Safety:** Changes are purely cosmetic/structural. Never alters behavior, propagates anti-patterns, or reduces type safety.
+**Safety checks — every edit must pass all of these:**
+- Does not change behavior (purely cosmetic/structural)
+- Does not propagate anti-patterns from surrounding code
+- Does not violate SOLID/DRY principles
+- Does not reduce type safety or remove error handling
+- CLAUDE.md wins any conflict with observed patterns
 
 ### `/review-plan` — Plan Reviewer
 
