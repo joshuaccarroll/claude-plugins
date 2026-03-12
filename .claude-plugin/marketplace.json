@@ -1,0 +1,37 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "joshuaccarroll-plugins",
+  "description": "Personal plugin marketplace for Claude Code",
+  "owner": {
+    "name": "Joshua Carroll"
+  },
+  "plugins": [
+    {
+      "name": "harmonize",
+      "description": "Reviews recently changed code and harmonizes it with the patterns, conventions, and style of the surrounding codebase",
+      "author": {
+        "name": "Joshua Carroll"
+      },
+      "source": "./plugins/harmonize",
+      "category": "productivity"
+    },
+    {
+      "name": "explain",
+      "description": "Explains code or concepts in succinct, plain English",
+      "author": {
+        "name": "Joshua Carroll"
+      },
+      "source": "./plugins/explain",
+      "category": "productivity"
+    },
+    {
+      "name": "review-plan",
+      "description": "Iteratively reviews and refines the current plan using sub-agents until convergence",
+      "author": {
+        "name": "Joshua Carroll"
+      },
+      "source": "./plugins/review-plan",
+      "category": "productivity"
+    }
+  ]
+}
