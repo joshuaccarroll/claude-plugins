@@ -1,0 +1,7 @@
+{
+  "name": "review-plan",
+  "description": "Iteratively reviews and refines the current plan using sub-agents until convergence",
+  "author": {
+    "name": "Joshua Carroll"
+  }
+}

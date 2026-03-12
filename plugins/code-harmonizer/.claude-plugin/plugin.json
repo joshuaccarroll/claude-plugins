@@ -1,0 +1,7 @@
+{
+  "name": "code-harmonizer",
+  "description": "Reviews recently changed code and harmonizes it with the patterns, conventions, and style of the surrounding codebase",
+  "author": {
+    "name": "Joshua Carroll"
+  }
+}
