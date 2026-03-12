@@ -27,7 +27,7 @@ Explains code or concepts in succinct, plain English.
 
 ## Installation
 
-This marketplace is registered in `~/.claude/plugins/known_marketplaces.json` as `claude-plugins-personal`. Plugins are available automatically in Claude Code sessions.
+This marketplace is registered in `~/.claude/plugins/known_marketplaces.json` as `claude-plugins-joshuaccarroll`. Plugins are available automatically in Claude Code sessions.
 
 To add a new plugin, create a directory under `plugins/` following this structure:
 
