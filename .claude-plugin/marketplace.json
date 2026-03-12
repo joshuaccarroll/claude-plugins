@@ -7,12 +7,12 @@
   },
   "plugins": [
     {
-      "name": "code-harmonizer",
+      "name": "harmonize",
       "description": "Reviews recently changed code and harmonizes it with the patterns, conventions, and style of the surrounding codebase",
       "author": {
         "name": "Joshua Carroll"
       },
-      "source": "./plugins/code-harmonizer",
+      "source": "./plugins/harmonize",
       "category": "productivity"
     },
     {
