@@ -1,0 +1,3 @@
+artifacts/latest/*.json
+artifacts/latest/summary.txt
+!artifacts/latest/.gitkeep
