@@ -29,6 +29,23 @@ log()  { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 warn() { log "WARN: $*" >&2; }
 die()  { log "FATAL: $*" >&2; exit 1; }
 
+# ── Portable timeout ────────────────────────────────────────────────────────
+# macOS lacks `timeout` by default; use perl as a fallback.
+
+if ! command -v timeout &>/dev/null; then
+  timeout() {
+    local duration="$1"; shift
+    perl -e '
+      alarm shift @ARGV;
+      $SIG{ALRM} = sub { kill 9, $pid; exit 124 };
+      $pid = fork // die "fork: $!";
+      if ($pid == 0) { exec @ARGV; die "exec: $!" }
+      waitpid $pid, 0;
+      exit ($? >> 8);
+    ' "$duration" "$@"
+  }
+fi
+
 # ── run_single ───────────────────────────────────────────────────────────────
 # Runs one invocation of the review-plan skill against a fixture.
 # Communicates results via stdout (pipe-separated: status|iterations|detail).
@@ -48,14 +65,15 @@ run_single() {
   mkdir -p "$(dirname "$PROMPT_DEST")"
   cp "$PROMPT_SRC" "$PROMPT_DEST"
 
-  # 3. Invoke Claude
+  # 3. Invoke Claude (pipe prompt via stdin to avoid argument-parsing issues)
   local raw_output exit_code
-  raw_output=$(timeout "$TIMEOUT_PER_RUN" claude -p \
+  raw_output=$(echo "Use the /review-plan skill to review the plan at ${TEST_DIR}/plan.md" | \
+    timeout "$TIMEOUT_PER_RUN" claude -p \
     --output-format json \
     --dangerously-skip-permissions \
     --max-budget-usd "$MAX_BUDGET_PER_RUN" \
     --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Task*" \
-    "Use the /review-plan skill to review the plan at ${TEST_DIR}/plan.md" 2>&1) || {
+    2>&1) || {
       exit_code=$?
       if [[ $exit_code -eq 124 ]]; then
         echo "stopped_early|0|timeout"
@@ -265,11 +283,11 @@ Constraints:
 "
 
   log "Invoking mutator for trial ${trial_number}..."
-  timeout 120 claude -p \
+  echo "$mutator_prompt" | timeout 120 claude -p \
     --dangerously-skip-permissions \
     --max-budget-usd 1.00 \
     --allowedTools "Read,Edit" \
-    "$mutator_prompt" > /dev/null 2>&1 || {
+    > /dev/null 2>&1 || {
       warn "Mutator invocation failed (exit $?)"
     }
 
