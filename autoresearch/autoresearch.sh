@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 AUTORESEARCH_DIR="${REPO_ROOT}/autoresearch"
 FIXTURES_DIR="${AUTORESEARCH_DIR}/fixtures"
 ARTIFACTS_DIR="${AUTORESEARCH_DIR}/artifacts/latest"
@@ -13,9 +13,9 @@ PROMPT_DEST="${HOME}/.claude/commands/review-plan.md"
 TEST_DIR="/tmp/autoresearch-test"
 FAILED_DIFF="/tmp/autoresearch-last-failed.diff"
 
-RUNS_PER_FIXTURE=10
+RUNS_PER_FIXTURE="${RUNS_PER_FIXTURE:-10}"
 MAX_BUDGET_PER_RUN="2.00"
-TIMEOUT_PER_RUN=300
+TIMEOUT_PER_RUN=600
 MAX_TRIAL_WALL_CLOCK=$((180 * 60))
 MAX_TRIALS=15
 RATE_LIMIT_BACKOFF=300
