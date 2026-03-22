@@ -76,17 +76,22 @@ converged = false
 while iteration < 3:
     Launch a Task sub-agent (general-purpose type) with this prompt:
 
-    "Read [FILE_PATH]. Review it critically as if you are seeing it for the first time.
-    Look for: gaps, missing details, unclear sections, over-engineering, incorrect assumptions,
-    missing edge cases, and areas that could be improved.
+    "Read [FILE_PATH]. This plan has already been reviewed and improved in a prior round.
+    Your job is to decide: is it ready for implementation?
 
-    Make concrete improvements directly to the file. Be specific and substantive --
-    do not add filler or unnecessary content.
+    ONLY make changes if you find issues that would cause implementation to FAIL or go wrong:
+    - A critical step is missing or in the wrong order
+    - An error/failure scenario has no handling strategy at all
+    - A requirement is too vague to actually implement (e.g., 'handle errors appropriately' with no specifics)
+    - A technical approach is fundamentally incorrect
 
-    If the document is solid and no meaningful improvements can be made,
-    respond with exactly: CONVERGED
+    Do NOT change: wording, style, minor clarifications, nice-to-haves, or anything that
+    would not affect whether implementation succeeds. Most plans after one review round
+    are ready — CONVERGED is the expected response.
 
-    Do not explain what you reviewed. Either improve the file or respond CONVERGED."
+    If the plan is implementable as-is, respond with exactly: CONVERGED
+
+    Either fix critical issues directly in the file, or respond CONVERGED. No explanations."
 
     if sub-agent output contains "CONVERGED":
         converged = true
