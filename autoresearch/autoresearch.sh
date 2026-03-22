@@ -46,6 +46,34 @@ if ! command -v timeout &>/dev/null; then
   }
 fi
 
+# ── validate_prompt ──────────────────────────────────────────────────────────
+# Checks 3 invariants against the prompt file. Returns 0 (pass) or 1 (fail).
+# If any invariant fails, the trial should score 0.
+
+validate_prompt() {
+  local prompt_file="$1"
+
+  # Invariant 1: Prompt instructs creating a plan file if one doesn't exist
+  if ! grep -iEq 'write.*plan.*file|write.*to.*\.md|write it to|create.*file|save.*plan.*file' "$prompt_file"; then
+    warn "INVARIANT FAIL: Prompt does not instruct creating a plan file"
+    return 1
+  fi
+
+  # Invariant 2: Prompt does NOT claim the plan was "already reviewed"
+  if grep -iEq 'already been reviewed|already.*reviewed.*improved|prior round|previous round' "$prompt_file"; then
+    warn "INVARIANT FAIL: Prompt introduces false assumptions about prior review"
+    return 1
+  fi
+
+  # Invariant 3: Prompt does NOT bias toward convergence as expected default
+  if grep -iEq 'most plans.*ready|expected response.*CONVERGED|CONVERGED.*expected response|convergence.*expected' "$prompt_file"; then
+    warn "INVARIANT FAIL: Prompt lowers quality bar by redefining success"
+    return 1
+  fi
+
+  return 0
+}
+
 # ── run_checkpoints ─────────────────────────────────────────────────────────
 # Evaluates fixture-specific quality checkpoints against a reviewed plan.
 # A checkpoint passes only if the pattern is NOT in the raw fixture but IS
@@ -215,6 +243,18 @@ run_trial() {
   # 2. Deploy prompt once (all parallel runs share the same prompt version)
   mkdir -p "$(dirname "$PROMPT_DEST")"
   cp "$PROMPT_SRC" "$PROMPT_DEST"
+
+  # 2b. Validate prompt invariants — if any fail, trial scores 0
+  if ! validate_prompt "$PROMPT_SRC"; then
+    log "Trial ${trial_number} FAILED: prompt invariant violated — scoring 0"
+    local timestamp
+    timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$trial_number" "$timestamp" "$label" "0" "0.00" "0.0" "0" \
+      "INVARIANT_VIOLATION" >> "$RESULTS_TSV"
+    echo "0|0.0"
+    return 0
+  fi
 
   # 3. Record start time
   local trial_start
