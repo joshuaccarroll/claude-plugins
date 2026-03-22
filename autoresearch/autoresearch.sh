@@ -14,6 +14,7 @@ TEST_DIR="/tmp/autoresearch-test"
 FAILED_DIFF="/tmp/autoresearch-last-failed.diff"
 
 RUNS_PER_FIXTURE="${RUNS_PER_FIXTURE:-10}"
+PARALLEL_JOBS="${PARALLEL_JOBS:-8}"
 MAX_BUDGET_PER_RUN="2.00"
 TIMEOUT_PER_RUN=600
 MAX_TRIAL_WALL_CLOCK=$((300 * 60))
@@ -48,26 +49,25 @@ fi
 
 # ── run_single ───────────────────────────────────────────────────────────────
 # Runs one invocation of the review-plan skill against a fixture.
-# Communicates results via stdout (pipe-separated: status|iterations|detail).
+# Writes result to ${artifact_prefix}_result.txt (pipe-separated: status|iterations|detail).
+# Uses an isolated temp dir per run for parallel safety.
 
 run_single() {
   local fixture="$1"
   local run_number="$2"
   local artifact_prefix="$3"
+  local result_file="${artifact_prefix}_result.txt"
 
-  # 1. Prepare workspace
-  rm -rf "$TEST_DIR" && mkdir -p "$TEST_DIR"
-  cp "${FIXTURES_DIR}/${fixture}.md" "${TEST_DIR}/plan.md"
+  # 1. Prepare isolated workspace
+  local work_dir="/tmp/autoresearch-${fixture}-run${run_number}"
+  rm -rf "$work_dir" && mkdir -p "$work_dir"
+  cp "${FIXTURES_DIR}/${fixture}.md" "${work_dir}/plan.md"
   local pre_hash
-  pre_hash=$(md5 -q "${TEST_DIR}/plan.md")
+  pre_hash=$(md5 -q "${work_dir}/plan.md")
 
-  # 2. Deploy prompt
-  mkdir -p "$(dirname "$PROMPT_DEST")"
-  cp "$PROMPT_SRC" "$PROMPT_DEST"
-
-  # 3. Invoke Claude (pipe prompt via stdin to avoid argument-parsing issues)
+  # 2. Invoke Claude (prompt deployed once by run_trial before launching)
   local raw_output exit_code
-  raw_output=$(echo "Use the /review-plan skill to review the plan at ${TEST_DIR}/plan.md" | \
+  raw_output=$(echo "Use the /review-plan skill to review the plan at ${work_dir}/plan.md" | \
     timeout "$TIMEOUT_PER_RUN" claude -p \
     --output-format json \
     --dangerously-skip-permissions \
@@ -75,25 +75,27 @@ run_single() {
     --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Task*" \
     2>&1) || {
       exit_code=$?
+      rm -rf "$work_dir"
       if [[ $exit_code -eq 124 ]]; then
-        echo "stopped_early|0|timeout"
+        echo "stopped_early|0|timeout" > "$result_file"
         return 0
       fi
-      echo "stopped_early|0|error_${exit_code}"
+      echo "stopped_early|0|error_${exit_code}" > "$result_file"
       return 0
     }
 
-  # 4. Save raw output
+  # 3. Save raw output
   echo "$raw_output" > "${artifact_prefix}_raw.json"
 
-  # 5. Extract RESULT line
+  # 4. Extract RESULT line
   local result_text result_line
   result_text=$(echo "$raw_output" | jq -r '.result // empty' 2>/dev/null || echo "$raw_output")
   result_line=$(echo "$result_text" | grep -oE 'RESULT: status=[a-z_]+ iterations=[0-9]+' | tail -1 || true)
 
-  # 6. Parse fields
+  # 5. Parse fields
   if [[ -z "$result_line" ]]; then
-    echo "stopped_early|0|no_result_line"
+    echo "stopped_early|0|no_result_line" > "$result_file"
+    rm -rf "$work_dir"
     return 0
   fi
 
@@ -101,22 +103,24 @@ run_single() {
   status=$(echo "$result_line" | sed 's/.*status=\([a-z_]*\).*/\1/')
   iterations=$(echo "$result_line" | sed 's/.*iterations=\([0-9]*\).*/\1/')
 
-  # 7. Validate convergence — check for false convergence
+  # 6. Validate convergence — check for false convergence
   if [[ "$status" == "converged" && "$iterations" -le 1 ]]; then
     local post_hash
-    post_hash=$(md5 -q "${TEST_DIR}/plan.md")
+    post_hash=$(md5 -q "${work_dir}/plan.md")
     if [[ "$pre_hash" == "$post_hash" ]]; then
-      echo "stopped_early|${iterations}|false_convergence"
+      echo "stopped_early|${iterations}|false_convergence" > "$result_file"
+      rm -rf "$work_dir"
       return 0
     fi
   fi
 
-  # 8. Return result
-  echo "${status}|${iterations}|ok"
+  # 7. Write result
+  echo "${status}|${iterations}|ok" > "$result_file"
+  rm -rf "$work_dir"
 }
 
 # ── run_trial ────────────────────────────────────────────────────────────────
-# Runs all fixtures * runs and produces a score.
+# Runs all fixtures * runs IN PARALLEL and produces a score.
 # Returns via stdout: score|avg_iterations
 
 run_trial() {
@@ -126,45 +130,69 @@ run_trial() {
   # 1. Clean artifacts
   rm -rf "$ARTIFACTS_DIR" && mkdir -p "$ARTIFACTS_DIR"
 
-  # 2. Record start time
+  # 2. Deploy prompt once (all parallel runs share the same prompt version)
+  mkdir -p "$(dirname "$PROMPT_DEST")"
+  cp "$PROMPT_SRC" "$PROMPT_DEST"
+
+  # 3. Record start time
   local trial_start
   trial_start=$(date +%s)
 
-  local completed=0 converged=0 total_iterations=0 total_runs=0
+  # 4. Launch all runs in parallel (throttled to PARALLEL_JOBS)
+  local total_expected=$(( ${#FIXTURES[@]} * RUNS_PER_FIXTURE ))
+  log "Launching ${total_expected} runs (${PARALLEL_JOBS} parallel)..."
 
-  # 3. Loop over fixtures and runs (sequential)
+  local job_count=0
+  local pids=()
+  local run_keys=()
+
   for fixture in "${FIXTURES[@]}"; do
     for run in $(seq 1 "$RUNS_PER_FIXTURE"); do
-      # Check wall-clock limit
-      local elapsed=$(( $(date +%s) - trial_start ))
-      if [[ $elapsed -ge $MAX_TRIAL_WALL_CLOCK ]]; then
-        warn "Wall-clock limit reached after ${elapsed}s"
-        break 2
-      fi
-
       local artifact_prefix="${ARTIFACTS_DIR}/${fixture}_run${run}"
-      local result=""
-      local retries=0
 
-      # Rate-limit retry loop
-      while [[ $retries -le $MAX_RATE_LIMIT_RETRIES ]]; do
-        result=$(run_single "$fixture" "$run" "$artifact_prefix")
-
-        if echo "$result" | grep -qiE 'rate_limit|429'; then
-          retries=$((retries + 1))
-          if [[ $retries -gt $MAX_RATE_LIMIT_RETRIES ]]; then
-            warn "Max rate-limit retries exceeded for ${fixture} run ${run}"
-            break
+      # Throttle: wait for a slot if at max parallel jobs
+      while [[ ${#pids[@]} -ge $PARALLEL_JOBS ]]; do
+        # Wait for any one job to finish, then remove it from the array
+        local new_pids=()
+        for pid in "${pids[@]}"; do
+          if kill -0 "$pid" 2>/dev/null; then
+            new_pids+=("$pid")
           fi
-          warn "Rate limited on ${fixture} run ${run}, backing off ${RATE_LIMIT_BACKOFF}s (retry ${retries}/${MAX_RATE_LIMIT_RETRIES})"
-          sleep "$RATE_LIMIT_BACKOFF"
-        else
-          break
+        done
+        pids=("${new_pids[@]}")
+        if [[ ${#pids[@]} -ge $PARALLEL_JOBS ]]; then
+          sleep 2
         fi
       done
 
+      # Launch run in background
+      run_single "$fixture" "$run" "$artifact_prefix" &
+      pids+=($!)
+      run_keys+=("${fixture}|${run}")
+      job_count=$((job_count + 1))
+    done
+  done
+
+  # 5. Wait for all jobs to complete
+  log "All ${job_count} runs launched. Waiting for completion..."
+  wait
+
+  # 6. Collect results from files
+  local completed=0 converged=0 total_iterations=0 total_runs=0
+
+  for fixture in "${FIXTURES[@]}"; do
+    for run in $(seq 1 "$RUNS_PER_FIXTURE"); do
+      local result_file="${ARTIFACTS_DIR}/${fixture}_run${run}_result.txt"
+      local result=""
+
+      if [[ -f "$result_file" ]]; then
+        result=$(cat "$result_file")
+      else
+        result="stopped_early|0|no_result_file"
+      fi
+
       # Parse pipe-separated result
-      local status detail iter
+      local status iter detail
       status=$(echo "$result" | cut -d'|' -f1)
       iter=$(echo "$result" | cut -d'|' -f2)
       detail=$(echo "$result" | cut -d'|' -f3)
@@ -178,7 +206,9 @@ run_trial() {
       if [[ "$status" == "converged" ]]; then
         converged=$((converged + 1))
       fi
-      total_iterations=$((total_iterations + iter))
+      if [[ "$iter" =~ ^[0-9]+$ ]]; then
+        total_iterations=$((total_iterations + iter))
+      fi
 
       # Log per-run result
       local run_log="${fixture} run ${run}: status=${status} iterations=${iter} detail=${detail}"
@@ -187,10 +217,10 @@ run_trial() {
     done
   done
 
-  # 4. Compute score
+  # 7. Compute score
   local score=$((completed + converged))
 
-  # 5. Compute stats
+  # 8. Compute stats
   local convergence_rate="0"
   if [[ $total_runs -gt 0 ]]; then
     convergence_rate=$(awk "BEGIN { printf \"%.2f\", ${converged}/${total_runs} }")
@@ -203,7 +233,7 @@ run_trial() {
 
   local duration=$(( $(date +%s) - trial_start ))
 
-  # 6. Append to results.tsv
+  # 9. Append to results.tsv
   if [[ ! -f "$RESULTS_TSV" ]]; then
     printf 'trial\ttimestamp\tlabel\tscore\tconvergence_rate\tavg_iterations\tduration_sec\tnotes\n' > "$RESULTS_TSV"
   fi
@@ -215,7 +245,7 @@ run_trial() {
 
   log "Trial ${trial_number} complete: score=${score}/80 convergence=${convergence_rate} avg_iter=${avg_iterations} duration=${duration}s"
 
-  # 7. Return score and avg_iterations
+  # 10. Return score and avg_iterations
   echo "${score}|${avg_iterations}"
 }
 
@@ -423,7 +453,11 @@ main() {
   case "${1:-}" in
     single)
       [[ -n "${2:-}" && -n "${3:-}" ]] || die "Usage: $0 single <fixture> <run>"
+      mkdir -p "$(dirname "$PROMPT_DEST")"
+      cp "$PROMPT_SRC" "$PROMPT_DEST"
+      mkdir -p "$(dirname "/tmp/autoresearch-single")"
       run_single "$2" "$3" "/tmp/autoresearch-single"
+      cat "/tmp/autoresearch-single_result.txt"
       ;;
     trial)
       run_trial "${2:-1}" "${3:-manual}"
