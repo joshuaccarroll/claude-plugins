@@ -10,7 +10,6 @@ ARTIFACTS_DIR="${AUTORESEARCH_DIR}/artifacts/latest"
 RESULTS_TSV="${AUTORESEARCH_DIR}/results.tsv"
 PROMPT_SRC="${REPO_ROOT}/plugins/review-plan/commands/review-plan.md"
 PROMPT_DEST="${HOME}/.claude/commands/review-plan.md"
-TEST_DIR="/tmp/autoresearch-test"
 FAILED_DIFF="/tmp/autoresearch-last-failed.diff"
 
 RUNS_PER_FIXTURE="${RUNS_PER_FIXTURE:-10}"
@@ -47,9 +46,61 @@ if ! command -v timeout &>/dev/null; then
   }
 fi
 
+# ── run_checkpoints ─────────────────────────────────────────────────────────
+# Evaluates fixture-specific quality checkpoints against a reviewed plan.
+# A checkpoint passes only if the pattern is NOT in the raw fixture but IS
+# in the reviewed plan (prevents false positives from pre-existing text).
+# Prints "passed/total" to stdout.
+
+run_checkpoints() {
+  local fixture="$1"
+  local reviewed_file="$2"
+  local raw_file="${FIXTURES_DIR}/${fixture}.md"
+  local passed=0 total=0
+
+  local patterns=()
+  case "$fixture" in
+    small-change)
+      patterns=(
+        'localStorage|zustand.*persist|existing.*persist|current.*storage|investigate.*persist|how.*currently'
+        'route.*change|on.*navigate|component.*mount|click.*card|trigger.*when.*mark|useEffect|fire.*when|fires when'
+        'responsive|breakpoint|overflow.*scroll|small.screen|narrow|@media|flex.*wrap|media.*query'
+      ) ;;
+    bug-fix)
+      patterns=(
+        'RegExp|new RegExp|replace\(\/|\.match\(\/|regex.*pattern|\\[<>*_~]'
+        'cache.*miss|not.*found.*user|lookup.*fail|resolve.*fail|fallback.*name|unknown.*user|stale.*cache'
+        'strip.*raw|pass.*through|best.effort|fallback.*text|leave.*as.is|escape.*markup|sanitize'
+      ) ;;
+    new-feature)
+      patterns=(
+        'abandon|cancel.*level|partial.*save|discard|unsaved.*change|close.*wizard|back.*button|undo.*level'
+        'history.*\[|levelUp.*{|LevelUpRecord|changelog|progression.*array|record.*{.*level'
+        'dialog|modal.*component|fullscreen.*modal|route.*/level|drawer|side.*panel|bottom.*sheet|overlay.*component'
+      ) ;;
+    greenfield)
+      patterns=(
+        'authenticat|session.*id|token|cookie|identity|login|uuid|anonymous.*id|player.*identif|sign.?in|oauth'
+        'reconnect|restore.*state|persist.*state|redis|recover.*session|heartbeat|rejoin'
+        'rate.?limit|throttl|cooldown|debounce|abuse|spam|quota|max.*request'
+        'system.*prompt|example.*card|few.?shot|temperature|you are|generate.*json|format.*output|sample.*response'
+      ) ;;
+  esac
+
+  for pattern in "${patterns[@]}"; do
+    total=$((total + 1))
+    if ! grep -iEq "$pattern" "$raw_file" && grep -iEq "$pattern" "$reviewed_file"; then
+      passed=$((passed + 1))
+    fi
+  done
+
+  echo "${passed}/${total}"
+}
+
 # ── run_single ───────────────────────────────────────────────────────────────
 # Runs one invocation of the review-plan skill against a fixture.
-# Writes result to ${artifact_prefix}_result.txt (pipe-separated: status|iterations|detail).
+# Writes result to ${artifact_prefix}_result.txt.
+# Format: status|iterations|quality|checkpoints_passed|checkpoints_total|detail
 # Uses an isolated temp dir per run for parallel safety.
 
 run_single() {
@@ -77,10 +128,10 @@ run_single() {
       exit_code=$?
       rm -rf "$work_dir"
       if [[ $exit_code -eq 124 ]]; then
-        echo "stopped_early|0|timeout" > "$result_file"
+        echo "stopped_early|0|0|0|0|timeout" > "$result_file"
         return 0
       fi
-      echo "stopped_early|0|error_${exit_code}" > "$result_file"
+      echo "stopped_early|0|0|0|0|error_${exit_code}" > "$result_file"
       return 0
     }
 
@@ -94,7 +145,7 @@ run_single() {
 
   # 5. Parse fields
   if [[ -z "$result_line" ]]; then
-    echo "stopped_early|0|no_result_line" > "$result_file"
+    echo "stopped_early|0|0|0|0|no_result_line" > "$result_file"
     rm -rf "$work_dir"
     return 0
   fi
@@ -108,14 +159,36 @@ run_single() {
     local post_hash
     post_hash=$(md5 -q "${work_dir}/plan.md")
     if [[ "$pre_hash" == "$post_hash" ]]; then
-      echo "stopped_early|${iterations}|false_convergence" > "$result_file"
+      echo "stopped_early|${iterations}|0|0|0|false_convergence" > "$result_file"
       rm -rf "$work_dir"
       return 0
     fi
   fi
 
-  # 7. Write result
-  echo "${status}|${iterations}|ok" > "$result_file"
+  # 7. Quality evaluation — diff check + checkpoints
+  # 7a. Plan improved? (≥3 substantive diff lines)
+  local diff_output diff_lines plan_improved=0
+  diff_output=$(diff -B -w "${FIXTURES_DIR}/${fixture}.md" "${work_dir}/plan.md" || true)
+  diff_lines=$(echo "$diff_output" | grep '^[<>]' | grep -v '^[<>][[:space:]]*$' | wc -l | tr -d ' ')
+  if [[ "$diff_lines" -ge 3 ]]; then
+    plan_improved=1
+  fi
+
+  # 7b. Checkpoints passed?
+  local checkpoint_result checkpoints_passed checkpoints_total
+  checkpoint_result=$(run_checkpoints "$fixture" "${work_dir}/plan.md")
+  checkpoints_passed=${checkpoint_result%/*}
+  checkpoints_total=${checkpoint_result#*/}
+
+  # 7c. Combined quality criterion: improved AND ≥50% checkpoints
+  local quality=0
+  local half=$(( (checkpoints_total + 1) / 2 ))
+  if [[ "$plan_improved" -eq 1 && "$checkpoints_passed" -ge "$half" ]]; then
+    quality=1
+  fi
+
+  # 8. Write result
+  echo "${status}|${iterations}|${quality}|${checkpoints_passed}|${checkpoints_total}|ok" > "$result_file"
   rm -rf "$work_dir"
 }
 
@@ -152,7 +225,6 @@ run_trial() {
 
       # Throttle: wait for a slot if at max parallel jobs
       while [[ ${#pids[@]} -ge $PARALLEL_JOBS ]]; do
-        # Wait for any one job to finish, then remove it from the array
         local new_pids=()
         for pid in "${pids[@]}"; do
           if kill -0 "$pid" 2>/dev/null; then
@@ -178,9 +250,11 @@ run_trial() {
   wait
 
   # 6. Collect results from files
-  local completed=0 converged=0 total_iterations=0 total_runs=0
+  local completed=0 converged=0 quality_count=0 total_iterations=0 total_runs=0
+  local checkpoint_details=""
 
   for fixture in "${FIXTURES[@]}"; do
+    local fixture_checkpoints_passed=0 fixture_checkpoints_total=0 fixture_runs=0
     for run in $(seq 1 "$RUNS_PER_FIXTURE"); do
       local result_file="${ARTIFACTS_DIR}/${fixture}_run${run}_result.txt"
       local result=""
@@ -188,37 +262,55 @@ run_trial() {
       if [[ -f "$result_file" ]]; then
         result=$(cat "$result_file")
       else
-        result="stopped_early|0|no_result_file"
+        result="stopped_early|0|0|0|0|no_result_file"
       fi
 
-      # Parse pipe-separated result
-      local status iter detail
+      # Parse expanded pipe-separated result
+      local status iter quality cp_passed cp_total detail
       status=$(echo "$result" | cut -d'|' -f1)
       iter=$(echo "$result" | cut -d'|' -f2)
-      detail=$(echo "$result" | cut -d'|' -f3)
+      quality=$(echo "$result" | cut -d'|' -f3)
+      cp_passed=$(echo "$result" | cut -d'|' -f4)
+      cp_total=$(echo "$result" | cut -d'|' -f5)
+      detail=$(echo "$result" | cut -d'|' -f6)
 
       total_runs=$((total_runs + 1))
+      fixture_runs=$((fixture_runs + 1))
 
-      # Score: criterion 1 = completed, criterion 2 = converged
+      # Score: 3 criteria
       if [[ "$status" != "stopped_early" ]]; then
         completed=$((completed + 1))
       fi
       if [[ "$status" == "converged" ]]; then
         converged=$((converged + 1))
       fi
+      if [[ "$quality" =~ ^[0-9]+$ && "$quality" -eq 1 ]]; then
+        quality_count=$((quality_count + 1))
+      fi
       if [[ "$iter" =~ ^[0-9]+$ ]]; then
         total_iterations=$((total_iterations + iter))
       fi
+      if [[ "$cp_passed" =~ ^[0-9]+$ ]]; then
+        fixture_checkpoints_passed=$((fixture_checkpoints_passed + cp_passed))
+      fi
+      if [[ "$cp_total" =~ ^[0-9]+$ ]]; then
+        fixture_checkpoints_total=$((fixture_checkpoints_total + cp_total))
+      fi
 
       # Log per-run result
-      local run_log="${fixture} run ${run}: status=${status} iterations=${iter} detail=${detail}"
+      local run_log="${fixture} run ${run}: status=${status} iter=${iter} quality=${quality} checkpoints=${cp_passed}/${cp_total} ${detail}"
       log "$run_log"
       echo "$run_log" >> "${ARTIFACTS_DIR}/summary.txt"
     done
+
+    # Per-fixture checkpoint summary
+    if [[ $fixture_runs -gt 0 ]]; then
+      checkpoint_details="${checkpoint_details}${fixture}: ${fixture_checkpoints_passed}/${fixture_checkpoints_total} checkpoints across ${fixture_runs} runs; "
+    fi
   done
 
-  # 7. Compute score
-  local score=$((completed + converged))
+  # 7. Compute score (max 120 = 40 completed + 40 converged + 40 quality)
+  local score=$((completed + converged + quality_count))
 
   # 8. Compute stats
   local convergence_rate="0"
@@ -241,9 +333,9 @@ run_trial() {
   timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$trial_number" "$timestamp" "$label" "$score" "$convergence_rate" "$avg_iterations" "$duration" \
-    "completed=${completed} converged=${converged} runs=${total_runs}" >> "$RESULTS_TSV"
+    "completed=${completed} converged=${converged} quality=${quality_count} runs=${total_runs} ${checkpoint_details}" >> "$RESULTS_TSV"
 
-  log "Trial ${trial_number} complete: score=${score}/80 convergence=${convergence_rate} avg_iter=${avg_iterations} duration=${duration}s"
+  log "Trial ${trial_number} complete: score=${score}/120 completed=${completed} converged=${converged} quality=${quality_count} avg_iter=${avg_iterations} duration=${duration}s"
 
   # 10. Return score and avg_iterations
   echo "${score}|${avg_iterations}"
@@ -275,11 +367,18 @@ invoke_mutator() {
   local mutator_prompt
   mutator_prompt="You are optimizing a Claude Code skill prompt for the /review-plan command.
 
-CURRENT SCORE: ${current_score}/80
-BEST SCORE:    ${best_score}/80
+CURRENT SCORE: ${current_score}/120
+BEST SCORE:    ${best_score}/120
 
-The score is: (number of runs that completed without stopping early) + (number of runs that converged).
-Total possible: 80 (40 runs x 2 criteria each).
+SCORING (3 criteria, 40 points each, max 120):
+1. COMPLETED (40): The run finished without crashing or timing out.
+2. CONVERGED (40): The skill declared convergence (a sub-agent responded CONVERGED).
+3. QUALITY (40): The skill made substantive edits (>=3 diff lines) AND addressed >=50% of
+   known fixture flaws (specific issues baked into each test plan that a thorough review should catch).
+
+A prompt that converges quickly but makes no real improvements will score ~80/120 (completed + converged
+but 0 quality). A prompt that does thorough reviews but never converges scores ~80/120 (completed + quality
+but 0 converged). The optimal prompt must do BOTH: converge efficiently AND produce quality improvements.
 
 LATEST TRIAL SUMMARY:
 ${trial_summary}
@@ -300,9 +399,9 @@ YOUR TASK:
 Make ONE targeted edit to the prompt file at ${PROMPT_SRC} to improve the score.
 
 Focus areas:
-- Clearer convergence signals so the agent knows when the plan is good enough
-- Preventing premature stopping (the agent should not give up early)
-- Reducing unnecessary iterations (the agent should not loop more than needed)
+- Ensuring sub-agents make substantive improvements (not just nitpicks or style changes)
+- Ensuring sub-agents declare CONVERGED when the plan is genuinely solid (not too early, not too late)
+- Ensuring reviews catch real gaps: missing error handling, vague steps, undefined strategies
 
 Constraints:
 - Do NOT change the RESULT: output format (RESULT: status=<status> iterations=<N>)
@@ -354,7 +453,7 @@ run_loop() {
   git -C "$REPO_ROOT" checkout -b "autoresearch/optimize-review-plan" 2>/dev/null || \
     git -C "$REPO_ROOT" checkout "autoresearch/optimize-review-plan" 2>/dev/null || true
 
-  log "Starting optimization loop (max ${MAX_TRIALS} trials)"
+  log "Starting optimization loop (max ${MAX_TRIALS} trials, score out of 120)"
 
   for trial in $(seq 1 "$MAX_TRIALS"); do
     log "=== Trial ${trial}/${MAX_TRIALS} ==="
@@ -385,19 +484,18 @@ run_loop() {
       best_score=$score
       best_avg_iters=$avg_iters
       git -C "$REPO_ROOT" add "$PROMPT_SRC"
-      git -C "$REPO_ROOT" commit -m "autoresearch: trial ${trial} — score ${score}" --allow-empty || true
+      git -C "$REPO_ROOT" commit -m "autoresearch: trial ${trial} — score ${score}/120" --allow-empty || true
       best_commit=$(git -C "$REPO_ROOT" rev-parse HEAD)
       consecutive_no_improve=0
     else
       log "No improvement (score=${score}, best=${best_score}) — reverting"
-      # Save failed diff
       git -C "$REPO_ROOT" diff "$PROMPT_SRC" > "$FAILED_DIFF" 2>/dev/null || true
       git -C "$REPO_ROOT" checkout -- "$PROMPT_SRC"
       consecutive_no_improve=$((consecutive_no_improve + 1))
     fi
 
-    # c. Track consecutive perfect
-    if [[ "$score" -eq 80 ]]; then
+    # c. Track consecutive perfect (120 = max score)
+    if [[ "$score" -eq 120 ]]; then
       consecutive_perfect=$((consecutive_perfect + 1))
     else
       consecutive_perfect=0
@@ -442,7 +540,7 @@ run_loop() {
   # Final report
   log "========================================"
   log "Optimization complete"
-  log "Best score:          ${best_score}/80"
+  log "Best score:          ${best_score}/120"
   log "Best avg iterations: ${best_avg_iters}"
   log "Best commit:         ${best_commit:-none}"
   log "========================================"
