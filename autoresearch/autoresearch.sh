@@ -359,9 +359,10 @@ run_loop() {
   for trial in $(seq 1 "$MAX_TRIALS"); do
     log "=== Trial ${trial}/${MAX_TRIALS} ==="
 
-    # a. Run trial
-    local trial_result
-    trial_result=$(run_trial "$trial" "trial_${trial}")
+    # a. Run trial (last line of stdout is score|avg_iters; earlier lines are log output)
+    local trial_output trial_result
+    trial_output=$(run_trial "$trial" "trial_${trial}")
+    trial_result=$(echo "$trial_output" | tail -1)
     local score avg_iters
     score=$(echo "$trial_result" | cut -d'|' -f1)
     avg_iters=$(echo "$trial_result" | cut -d'|' -f2)

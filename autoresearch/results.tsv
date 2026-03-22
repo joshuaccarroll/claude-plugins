@@ -1,3 +1,6 @@
 trial	timestamp	label	score	convergence_rate	avg_iterations	duration_sec	notes
 0	2026-03-21T18:28:16Z	reduced_baseline	6	0.00	2.0	3266	completed=6 converged=0 runs=12
 0	2026-03-21T21:34:37Z	full_baseline	37	0.00	4.0	11087	completed=37 converged=0 runs=37
+1	2026-03-22T01:48:26Z	trial_1	43	0.07	4.0	1739	completed=40 converged=3 runs=40
+2	2026-03-22T01:58:58Z	trial_2	80	1.00	2.0	595	completed=40 converged=40 runs=40
+3	2026-03-22T02:10:54Z	trial_3	80	1.00	2.0	596	completed=40 converged=40 runs=40
