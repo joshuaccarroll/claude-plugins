@@ -4,3 +4,5 @@ trial	timestamp	label	score	convergence_rate	avg_iterations	duration_sec	notes
 1	2026-03-22T01:48:26Z	trial_1	43	0.07	4.0	1739	completed=40 converged=3 runs=40
 2	2026-03-22T01:58:58Z	trial_2	80	1.00	2.0	595	completed=40 converged=40 runs=40
 3	2026-03-22T02:10:54Z	trial_3	80	1.00	2.0	596	completed=40 converged=40 runs=40
+0	2026-03-22T06:34:56Z	quality_baseline	19	0.00	3.7	804	completed=11 converged=0 quality=8 runs=12 small-change: 9/9 checkpoints across 3 runs; bug-fix: 9/9 checkpoints across 3 runs; new-feature: 2/9 checkpoints across 3 runs; greenfield: 7/8 checkpoints across 3 runs; 
+0	2026-03-22T06:35:47Z	quality_baseline	19	0.00	3.7	849	completed=11 converged=0 quality=8 runs=12 small-change: 9/9 checkpoints across 3 runs; bug-fix: 9/9 checkpoints across 3 runs; new-feature: 2/9 checkpoints across 3 runs; greenfield: 7/8 checkpoints across 3 runs; 

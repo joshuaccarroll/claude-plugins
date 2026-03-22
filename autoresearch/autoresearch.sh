@@ -167,16 +167,25 @@ run_single() {
 
   # 7. Quality evaluation — diff check + checkpoints
   # 7a. Plan improved? (≥3 substantive diff lines)
-  local diff_output diff_lines plan_improved=0
-  diff_output=$(diff -B -w "${FIXTURES_DIR}/${fixture}.md" "${work_dir}/plan.md" || true)
-  diff_lines=$(echo "$diff_output" | grep '^[<>]' | grep -v '^[<>][[:space:]]*$' | wc -l | tr -d ' ')
+  local diff_lines plan_improved=0
+  if [[ -f "${work_dir}/plan.md" ]]; then
+    local diff_output
+    diff_output=$(diff -B -w "${FIXTURES_DIR}/${fixture}.md" "${work_dir}/plan.md" 2>/dev/null || true)
+    diff_lines=$(echo "$diff_output" | grep '^[<>]' | grep -v '^[<>][[:space:]]*$' | wc -l | tr -d ' ')
+  else
+    diff_lines=0
+  fi
   if [[ "$diff_lines" -ge 3 ]]; then
     plan_improved=1
   fi
 
   # 7b. Checkpoints passed?
   local checkpoint_result checkpoints_passed checkpoints_total
-  checkpoint_result=$(run_checkpoints "$fixture" "${work_dir}/plan.md")
+  if [[ -f "${work_dir}/plan.md" ]]; then
+    checkpoint_result=$(run_checkpoints "$fixture" "${work_dir}/plan.md")
+  else
+    checkpoint_result="0/0"
+  fi
   checkpoints_passed=${checkpoint_result%/*}
   checkpoints_total=${checkpoint_result#*/}
 
