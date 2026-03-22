@@ -13,12 +13,7 @@ Save the current plan to a md file if not already saved. Then use the Task tool 
 
 3. **Apply findings**: Read the sub-agent responses. Apply substantive findings to the plan file. Skip nitpicks.
 
-4. **Rounds 2-6 — Serial convergence** (up to 5 iterations): Spawn one Task sub-agent per round. Each agent must:
-   - Read the entire plan file.
-   - Check every step against this checklist: (a) Is the step specific enough to implement without guessing? (b) Are error/failure modes handled for risky operations? (c) Are edge cases and input validation covered? (d) Are rollback or recovery strategies defined where needed? (e) Are prerequisites and dependencies explicit? (f) Is the technical approach correct?
-   - **Edit the plan file directly** to fix any real issues found. Do not just report findings — make the actual edits.
-   - After editing, re-read the plan. If no remaining issues would block a developer from implementing it correctly on the first try, respond with exactly `CONVERGED`. Ignore wording, formatting, and style — only substantive implementation-blocking gaps matter for convergence.
-   Stop when a sub-agent responds `CONVERGED` or after 5 rounds.
+4. **Rounds 2-6 — Serial convergence** (up to 5 iterations): Spawn one Task sub-agent per round to review the plan with fresh eyes. The agent should fix any issues that would cause implementation to fail — missing steps, vague requirements, incorrect approaches, unhandled failures. It should not bother with wording or style. If the plan is implementable, respond `CONVERGED`. Stop when a sub-agent responds `CONVERGED` or after 5 rounds.
 
 5. **Report**: Summarize findings, iterations, convergence status, and key changes.
 
