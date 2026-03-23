@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PATH="$HOME/.local/bin:$PATH"
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -14,8 +15,9 @@ TEST_DIR="/tmp/autoresearch-test"
 FAILED_DIFFS_DIR="/tmp/autoresearch-failed-diffs/"
 
 RUNS_PER_FIXTURE=10
+PARALLEL_JOBS=8
 MAX_BUDGET_PER_RUN="3.00"
-TIMEOUT_PER_RUN=300
+TIMEOUT_PER_RUN=600
 MAX_TRIAL_WALL_CLOCK=$((180 * 60))
 MAX_TRIALS=15
 RATE_LIMIT_BACKOFF=300
@@ -30,11 +32,153 @@ declare -a LABELS_bug_fix=("regex pattern fix" "cache miss handling" "raw text s
 declare -a LABELS_new_feature=("abandon mid-wizard" "level-up data model" "wizard UI component")
 declare -a LABELS_greenfield=("authentication" "reconnection" "rate limiting" "LLM integration")
 
+# ── Portable timeout ────────────────────────────────────────────────────────
+# macOS lacks `timeout` by default; use perl as a fallback.
+
+if ! command -v timeout &>/dev/null; then
+  timeout() {
+    local duration="$1"; shift
+    perl -e '
+      alarm shift @ARGV;
+      $SIG{ALRM} = sub { kill 9, $pid; exit 124 };
+      $pid = fork // die "fork: $!";
+      if ($pid == 0) { exec @ARGV; die "exec: $!" }
+      waitpid $pid, 0;
+      exit ($? >> 8);
+    ' "$duration" "$@"
+  }
+fi
+
 # ── Logging helpers ──────────────────────────────────────────────────────────
 
-log()  { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
+log()  { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
 warn() { log "WARN: $*" >&2; }
 die()  { log "FATAL: $*" >&2; exit 1; }
+
+# ── validate_prompt ──────────────────────────────────────────────────────────
+# Checks invariants against the prompt file. Returns 0 (pass) or 1 (fail).
+
+validate_prompt() {
+  local prompt_file="$1"
+
+  # Invariant 1: Prompt instructs creating a plan file if one doesn't exist
+  if ! grep -iEq 'write.*plan.*file|write.*to.*\.md|write it to|create.*file|save.*plan.*file|save.*plan|plan.*file' "$prompt_file"; then
+    warn "INVARIANT FAIL: Prompt does not instruct creating a plan file"
+    return 1
+  fi
+
+  # Invariant 2: Prompt does NOT claim the plan was "already reviewed"
+  if grep -iEq 'already been reviewed|already.*reviewed.*improved|prior round|previous round' "$prompt_file"; then
+    warn "INVARIANT FAIL: Prompt introduces false assumptions about prior review"
+    return 1
+  fi
+
+  # Invariant 3: Prompt does NOT bias toward convergence as expected default
+  if grep -iEq 'most plans.*ready|expected response.*CONVERGED|CONVERGED.*expected response|convergence.*expected' "$prompt_file"; then
+    warn "INVARIANT FAIL: Prompt lowers quality bar by redefining success"
+    return 1
+  fi
+
+  return 0
+}
+
+# ── validate_mutation ────────────────────────────────────────────────────────
+# Validates a mutation using fast programmatic checks + an adversarial LLM review.
+# Args: $1=prompt file, $2=best_commit (to compare against)
+# Returns 0 (pass) or 1 (fail with reason logged).
+
+validate_mutation() {
+  local prompt_file="$1"
+  local base_commit="${2:-}"
+
+  # 1. Basic invariants (fast, programmatic)
+  if ! validate_prompt "$prompt_file"; then
+    return 1
+  fi
+
+  # 2. File must not be empty or too short
+  local line_count
+  line_count=$(wc -l < "$prompt_file" | tr -d ' ')
+  if [[ ! -s "$prompt_file" || "$line_count" -lt 2 ]]; then
+    warn "MUTATION REJECTED: File is empty or too short (${line_count} lines)"
+    return 1
+  fi
+
+  # Skip comparison checks if no base commit
+  if [[ -z "$base_commit" ]]; then
+    return 0
+  fi
+
+  # 3. Gather context for LLM review
+  local old_prompt
+  old_prompt=$(git -C "$REPO_ROOT" show "${base_commit}:${prompt_file#${REPO_ROOT}/}" 2>/dev/null || true)
+  local new_prompt
+  new_prompt=$(cat "$prompt_file")
+  local diff_content
+  diff_content=$(git -C "$REPO_ROOT" diff "${base_commit}" -- "$prompt_file" 2>/dev/null || true)
+
+  local old_words new_words
+  old_words=$(echo "$old_prompt" | wc -w | tr -d ' ')
+  new_words=$(echo "$new_prompt" | wc -w | tr -d ' ')
+
+  # 4. Adversarial LLM review
+  local review_prompt
+  review_prompt="You are reviewing a proposed mutation to a prompt we are optimizing. Be permissive — only reject clearly bad mutations.
+
+CONTEXT: The prompt instructs Claude to iteratively review implementation plans using sub-agents. Scoring rewards completion, convergence, and quality checkpoints.
+
+CURRENT BEST (${old_words} words):
+${old_prompt}
+
+PROPOSED (${new_words} words):
+${new_prompt}
+
+DIFF:
+${diff_content}
+
+REJECT only if the mutation is clearly doing one of these:
+
+1. FULL REWRITE: Replaces the entire prompt rather than making a focused change. Restructuring or rewording parts is fine — wholesale replacement is not.
+
+2. GAMING: Actively tries to hack the scoring rather than improve review quality:
+   - Tells the agent to skip review or assume the plan is good
+   - Biases toward always reporting CONVERGED regardless of plan quality
+   - Removes sub-agent iteration entirely
+   Note: Improving RESULT: line formatting, adding clarifying examples, or structural changes that help the agent succeed are NOT gaming — they are legitimate improvements.
+
+3. SABOTAGE: Removes core review mechanics (sub-agent spawning, critical analysis, convergence loop).
+
+Length increases are acceptable if they serve a purpose. Minor wording changes, formatting fixes, and structural improvements should PASS.
+
+When in doubt, PASS. Let the trial results determine if the mutation actually helps.
+
+Respond with exactly one line:
+PASS — if the mutation seems reasonable
+REJECT: <reason> — only if clearly gaming, rewriting, or sabotaging"
+
+  local review_result
+  review_result=$(echo "$review_prompt" | timeout 60 claude -p \
+    --output-format text \
+    --dangerously-skip-permissions 2>/dev/null || echo "REJECT: LLM review failed or timed out")
+
+  # Parse the last non-empty line (in case of preamble)
+  local verdict
+  verdict=$(echo "$review_result" | grep -iE '^(PASS|REJECT)' | tail -1)
+
+  if [[ -z "$verdict" ]]; then
+    warn "MUTATION REVIEW: No clear verdict — treating as REJECT"
+    warn "Review output: ${review_result}"
+    return 1
+  fi
+
+  if echo "$verdict" | grep -iq '^REJECT'; then
+    warn "MUTATION REJECTED by LLM reviewer: ${verdict}"
+    return 1
+  fi
+
+  log "Mutation passed LLM review: ${verdict}"
+  return 0
+}
 
 # ── run_checkpoints ──────────────────────────────────────────────────────────
 # Evaluates fixture-specific quality patterns.
@@ -42,6 +186,7 @@ die()  { log "FATAL: $*" >&2; exit 1; }
 
 run_checkpoints() {
   local fixture="$1"
+  local reviewed_file="$2"
 
   # Fixture-specific patterns (must match existing checkpoint logic)
   local -a patterns
@@ -81,8 +226,8 @@ run_checkpoints() {
   esac
 
   local plan_content=""
-  if [[ -f "${TEST_DIR}/plan.md" ]]; then
-    plan_content=$(cat "${TEST_DIR}/plan.md")
+  if [[ -f "$reviewed_file" ]]; then
+    plan_content=$(cat "$reviewed_file")
   fi
 
   local idx=0
@@ -104,45 +249,45 @@ run_single() {
   local fixture="$1"
   local run_number="$2"
   local artifact_prefix="$3"
+  local result_file="${artifact_prefix}_result.txt"
 
-  # 1. Prepare workspace
-  rm -rf "$TEST_DIR" && mkdir -p "$TEST_DIR"
-  cp "${FIXTURES_DIR}/${fixture}.md" "${TEST_DIR}/plan.md"
+  # 1. Prepare isolated workspace (per-run to support parallel execution)
+  local work_dir="/tmp/autoresearch-${fixture}-run${run_number}"
+  rm -rf "$work_dir" && mkdir -p "$work_dir"
+  cp "${FIXTURES_DIR}/${fixture}.md" "${work_dir}/plan.md"
   local pre_hash
-  pre_hash=$(md5 -q "${TEST_DIR}/plan.md")
+  pre_hash=$(md5 -q "${work_dir}/plan.md")
 
-  # 2. Deploy prompt
-  mkdir -p "$(dirname "$PROMPT_DEST")"
-  cp "$PROMPT_SRC" "$PROMPT_DEST"
-
-  # 3. Invoke Claude
+  # 2. Invoke Claude
   local raw_output exit_code
-  raw_output=$(timeout "$TIMEOUT_PER_RUN" claude -p \
+  raw_output=$(echo "Use the /review-plan skill to review the plan at ${work_dir}/plan.md" | \
+    timeout "$TIMEOUT_PER_RUN" claude -p \
     --output-format json \
     --dangerously-skip-permissions \
     --max-budget-usd "$MAX_BUDGET_PER_RUN" \
-    --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Task*" \
-    "Use the /review-plan skill to review the plan at ${TEST_DIR}/plan.md" 2>&1) || {
+    --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Task*" 2>&1) || {
       exit_code=$?
+      rm -rf "$work_dir"
       if [[ $exit_code -eq 124 ]]; then
-        echo "stopped_early|0|timeout"
+        echo "stopped_early|0|timeout" > "$result_file"
         return 0
       fi
-      echo "stopped_early|0|error_${exit_code}"
+      echo "stopped_early|0|error_${exit_code}" > "$result_file"
       return 0
     }
 
-  # 4. Save raw output
+  # 3. Save raw output
   echo "$raw_output" > "${artifact_prefix}_raw.json"
 
-  # 5. Extract RESULT line
+  # 4. Extract RESULT line
   local result_text result_line
   result_text=$(echo "$raw_output" | jq -r '.result // empty' 2>/dev/null || echo "$raw_output")
   result_line=$(echo "$result_text" | grep -oE 'RESULT: status=[a-z_]+ iterations=[0-9]+' | tail -1 || true)
 
-  # 6. Parse fields
+  # 5. Parse fields
   if [[ -z "$result_line" ]]; then
-    echo "stopped_early|0|no_result_line"
+    echo "stopped_early|0|no_result_line" > "$result_file"
+    rm -rf "$work_dir"
     return 0
   fi
 
@@ -150,23 +295,25 @@ run_single() {
   status=$(echo "$result_line" | sed 's/.*status=\([a-z_]*\).*/\1/')
   iterations=$(echo "$result_line" | sed 's/.*iterations=\([0-9]*\).*/\1/')
 
-  # 7. Validate convergence — check for false convergence
+  # 6. Validate convergence — check for false convergence
   if [[ "$status" == "converged" && "$iterations" -le 1 ]]; then
     local post_hash
-    post_hash=$(md5 -q "${TEST_DIR}/plan.md")
+    post_hash=$(md5 -q "${work_dir}/plan.md")
     if [[ "$pre_hash" == "$post_hash" ]]; then
-      echo "stopped_early|${iterations}|false_convergence"
+      echo "stopped_early|${iterations}|false_convergence" > "$result_file"
+      rm -rf "$work_dir"
       return 0
     fi
   fi
 
-  # 8. Run checkpoints and save per-pattern results
+  # 7. Run checkpoints and save per-pattern results
   local checkpoint_output
-  checkpoint_output=$(run_checkpoints "$fixture")
+  checkpoint_output=$(run_checkpoints "$fixture" "${work_dir}/plan.md")
   echo "$checkpoint_output" > "${artifact_prefix}_checkpoints.txt"
 
-  # 9. Return result (main format unchanged)
-  echo "${status}|${iterations}|ok"
+  # 8. Write result file (for parallel collection after wait)
+  echo "${status}|${iterations}|ok" > "$result_file"
+  rm -rf "$work_dir"
 }
 
 # ── score_result_file ────────────────────────────────────────────────────────
@@ -239,41 +386,57 @@ run_trial() {
 
   local total_score=0 total_iterations=0 total_runs=0
 
-  # 3. Loop over fixtures and runs (sequential)
+  # 3. Deploy prompt once (all parallel runs share the same prompt version)
+  mkdir -p "$(dirname "$PROMPT_DEST")"
+  cp "$PROMPT_SRC" "$PROMPT_DEST"
+
+  # 4. Launch all runs in parallel (throttled to PARALLEL_JOBS)
+  local total_expected=$(( ${#FIXTURES[@]} * RUNS_PER_FIXTURE ))
+  log "Launching ${total_expected} runs (${PARALLEL_JOBS} parallel)..."
+
+  local pids=()
   for fixture in "${FIXTURES[@]}"; do
     for run in $(seq 1 "$RUNS_PER_FIXTURE"); do
-      # Check wall-clock limit
-      local elapsed=$(( $(date +%s) - trial_start ))
-      if [[ $elapsed -ge $MAX_TRIAL_WALL_CLOCK ]]; then
-        warn "Wall-clock limit reached after ${elapsed}s"
-        break 2
-      fi
-
       local artifact_prefix="${ARTIFACTS_DIR}/${fixture}_run${run}"
-      local result=""
-      local retries=0
 
-      # Rate-limit retry loop
-      while [[ $retries -le $MAX_RATE_LIMIT_RETRIES ]]; do
-        result=$(run_single "$fixture" "$run" "$artifact_prefix")
-
-        if echo "$result" | grep -qiE 'rate_limit|429'; then
-          retries=$((retries + 1))
-          if [[ $retries -gt $MAX_RATE_LIMIT_RETRIES ]]; then
-            warn "Max rate-limit retries exceeded for ${fixture} run ${run}"
-            break
+      # Throttle: wait for a slot if at max parallel jobs
+      while [[ ${#pids[@]} -ge $PARALLEL_JOBS ]]; do
+        local new_pids=()
+        for pid in "${pids[@]}"; do
+          if kill -0 "$pid" 2>/dev/null; then
+            new_pids+=("$pid")
           fi
-          warn "Rate limited on ${fixture} run ${run}, backing off ${RATE_LIMIT_BACKOFF}s (retry ${retries}/${MAX_RATE_LIMIT_RETRIES})"
-          sleep "$RATE_LIMIT_BACKOFF"
-        else
-          break
+        done
+        pids=("${new_pids[@]}")
+        if [[ ${#pids[@]} -ge $PARALLEL_JOBS ]]; then
+          sleep 2
         fi
       done
 
-      # Save result to file for score_result_file()
-      echo "$result" > "${artifact_prefix}_result.txt"
+      # Launch run in background
+      run_single "$fixture" "$run" "$artifact_prefix" &
+      pids+=($!)
+    done
+  done
 
-      # Parse pipe-separated result
+  # 5. Wait for all jobs to complete
+  log "All ${total_expected} runs launched. Waiting for completion..."
+  wait
+
+  # 6. Collect results from files
+  for fixture in "${FIXTURES[@]}"; do
+    for run in $(seq 1 "$RUNS_PER_FIXTURE"); do
+      local artifact_prefix="${ARTIFACTS_DIR}/${fixture}_run${run}"
+      local result_file="${artifact_prefix}_result.txt"
+      local result=""
+
+      if [[ -f "$result_file" ]]; then
+        result=$(cat "$result_file")
+      else
+        result="stopped_early|0|no_result_file"
+        echo "$result" > "$result_file"
+      fi
+
       local status detail iter
       status=$(echo "$result" | cut -d'|' -f1)
       iter=$(echo "$result" | cut -d'|' -f2)
@@ -281,13 +444,11 @@ run_trial() {
 
       total_runs=$((total_runs + 1))
 
-      # Score using score_result_file()
       local run_score
-      run_score=$(score_result_file "${artifact_prefix}_result.txt")
+      run_score=$(score_result_file "$result_file")
       total_score=$((total_score + run_score))
       total_iterations=$((total_iterations + iter))
 
-      # Log per-run result
       local run_log="${fixture} run ${run}: status=${status} iterations=${iter} detail=${detail} score=${run_score}"
       log "$run_log"
       echo "$run_log" >> "${ARTIFACTS_DIR}/summary.txt"
@@ -374,157 +535,60 @@ invoke_mutator() {
   local current_score="$2"
   local best_score="$3"
   local best_commit="${4:-}"
+  local diversity_hint="${5:-}"
 
-  local trial_summary=""
-  if [[ -f "${ARTIFACTS_DIR}/summary.txt" ]]; then
-    trial_summary=$(cat "${ARTIFACTS_DIR}/summary.txt")
-  fi
-
-  local current_prompt=""
-  if [[ -f "$PROMPT_SRC" ]]; then
-    current_prompt=$(cat "$PROMPT_SRC")
-  fi
-
-  # Read checkpoint detail
-  local checkpoint_detail=""
-  if [[ -f "${ARTIFACTS_DIR}/checkpoint_detail.txt" ]]; then
-    checkpoint_detail=$(cat "${ARTIFACTS_DIR}/checkpoint_detail.txt")
-  fi
-
-  # Read word count
-  local word_count="0"
-  if [[ -f "${ARTIFACTS_DIR}/word_count.txt" ]]; then
-    word_count=$(cat "${ARTIFACTS_DIR}/word_count.txt")
-  fi
-
-  # Read up to 5 most recent failed diffs
-  local failed_diffs_content=""
-  if [[ -d "$FAILED_DIFFS_DIR" ]]; then
-    local diff_count=0
-    for f in $(ls -t "$FAILED_DIFFS_DIR"/*.diff 2>/dev/null | head -5); do
-      diff_count=$((diff_count + 1))
-      failed_diffs_content="${failed_diffs_content}
---- Failed diff #${diff_count} ($(basename "$f")) ---
-$(cat "$f")
-"
-    done
-  fi
-
+  # Build a concise mutator prompt — let the mutator Read files for detail
   local mutator_prompt
-  mutator_prompt="You are optimizing a Claude Code skill prompt for the /review-plan command.
+  mutator_prompt="You are optimizing a prompt file. Read it, make ONE targeted edit, then stop.
 
-CURRENT SCORE: ${current_score}/120
-BEST SCORE:    ${best_score}/120
+FILE: ${PROMPT_SRC}
+SCORE: ${current_score}/120 (best: ${best_score}/120)
+SCORING: 40 runs × 3 criteria (completed +1, converged +1, quality checkpoints +1)
 
-The score is: (completed: +1) + (converged: +1) + (quality checkpoints all pass: +1) per run.
-Total possible: 120 (40 runs x 3 criteria each).
-
-LATEST TRIAL SUMMARY:
-${trial_summary}
-"
-
-  if [[ -n "$checkpoint_detail" ]]; then
-    mutator_prompt="${mutator_prompt}
-CHECKPOINT DETAIL:
-${checkpoint_detail}
-"
-  fi
-
-  mutator_prompt="${mutator_prompt}
-CURRENT PROMPT (file: ${PROMPT_SRC}):
-${current_prompt}
-"
-
-  if [[ -n "$failed_diffs_content" ]]; then
-    mutator_prompt="${mutator_prompt}
-PREVIOUS FAILED MUTATION DIFFS:
-${failed_diffs_content}
-"
-  fi
-
-  mutator_prompt="${mutator_prompt}
-KEY INSIGHT: Shorter prompts consistently outperform longer ones. The model already
-knows how to review a plan — over-specifying narrows attention and wastes budget.
-Current prompt is ${word_count} words. Prefer removing or simplifying over adding.
-
-YOUR TASK:
-Make ONE targeted edit to the prompt file at ${PROMPT_SRC} to improve the score.
-
-Focus areas:
-- Clearer convergence signals so the agent knows when the plan is good enough
-- Preventing premature stopping (the agent should not give up early)
-- Reducing unnecessary iterations (the agent should not loop more than needed)
+Key files you can Read for context:
+- ${ARTIFACTS_DIR}/summary.txt — per-run results from the last trial
+- ${ARTIFACTS_DIR}/checkpoint_detail.txt — which quality checks are failing
 
 Constraints:
-- Do NOT change the RESULT: output format (RESULT: status=<status> iterations=<N>)
-- Do NOT remove the sub-agent RESULT: prohibition (sub-agents must not emit RESULT: lines)
-- Make ONE change, not a full rewrite
-- The file must stay at least 2 lines long
-- Edit the file directly at: ${PROMPT_SRC}
-"
+- Make ONE targeted edit to ${PROMPT_SRC}. Not a rewrite.
+- Keep it concise — shorter prompts outperform longer ones.
+- Do NOT change the RESULT: output format.
+- The prompt must still instruct iterative sub-agent review with convergence."
+
+  if [[ -n "$diversity_hint" ]]; then
+    mutator_prompt="${mutator_prompt}
+
+${diversity_hint}"
+  fi
 
   log "Invoking mutator for trial ${trial_number}..."
 
-  local max_diversity_retries=2
-  local attempt=0
+  local mutator_log="${ARTIFACTS_DIR}/mutator_attempt_t${trial_number}.log"
+  echo "$mutator_prompt" | timeout 300 claude -p \
+    --dangerously-skip-permissions \
+    --output-format json \
+    --max-budget-usd 2.00 \
+    --allowedTools "Read,Edit" > "$mutator_log" 2>&1 || {
+      warn "Mutator invocation failed (exit $?)"
+    }
+  log "Mutator output saved to ${mutator_log}"
 
-  while [[ $attempt -le $max_diversity_retries ]]; do
-    timeout 120 claude -p \
-      --dangerously-skip-permissions \
-      --max-budget-usd 1.00 \
-      --allowedTools "Read,Edit" \
-      "$mutator_prompt" > /dev/null 2>&1 || {
-        warn "Mutator invocation failed (exit $?)"
-      }
+  # Verify the RESULT: instruction survived
+  if ! grep -q 'RESULT:' "$PROMPT_SRC"; then
+    warn "Mutator removed RESULT: instruction — restoring"
+    restore_prompt "$best_commit"
+    return 1
+  fi
 
-    # Verify the RESULT: instruction survived
-    if ! grep -q 'RESULT:' "$PROMPT_SRC"; then
-      warn "Mutator removed RESULT: instruction — restoring from git"
-      restore_prompt "$best_commit"
+  # Check for no-change (identical to best)
+  if [[ -n "$best_commit" ]]; then
+    local diff_size
+    diff_size=$(git -C "$REPO_ROOT" diff "${best_commit}" -- "$PROMPT_SRC" 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$diff_size" -eq 0 ]]; then
+      warn "Mutator made no changes"
+      return 1
     fi
-
-    # Check for duplicate diff (diversity enforcement)
-    if [[ -n "$best_commit" && -d "$FAILED_DIFFS_DIR" ]]; then
-      git -C "$REPO_ROOT" diff "${best_commit}" -- "$PROMPT_SRC" > /tmp/autoresearch-candidate.diff 2>/dev/null || true
-      local is_duplicate=false
-      for f in "$FAILED_DIFFS_DIR"/*.diff; do
-        [[ -f "$f" ]] || continue
-        if diff -q /tmp/autoresearch-candidate.diff "$f" > /dev/null 2>&1; then
-          is_duplicate=true
-          break
-        fi
-      done
-
-      if [[ "$is_duplicate" == "true" ]]; then
-        attempt=$((attempt + 1))
-        if [[ $attempt -gt $max_diversity_retries ]]; then
-          warn "All ${max_diversity_retries} diversity retries produced duplicate diffs — skipping mutation"
-          restore_prompt "$best_commit"
-          return 1
-        fi
-        warn "Duplicate diff detected — retrying with stronger diversity instruction (attempt ${attempt})"
-        restore_prompt "$best_commit"
-
-        # Count failed diffs
-        local num_failed=0
-        num_failed=$(ls "$FAILED_DIFFS_DIR"/*.diff 2>/dev/null | wc -l | tr -d ' ')
-
-        mutator_prompt="${mutator_prompt}
-
-IMPORTANT: You already tried this exact change and it did not improve the score.
-Previous failed attempts: ${num_failed} (diffs listed above).
-You MUST try something fundamentally different. Consider:
-- Changing the tone or framing rather than adding structure
-- Removing words rather than adding them (shorter prompts score better)
-- Adding context about what makes a good plan review rather than process instructions
-"
-        continue
-      fi
-    fi
-
-    # No duplicate — success
-    break
-  done
+  fi
 
   return 0
 }
@@ -548,13 +612,14 @@ restore_prompt() {
 run_quick_check() {
   mkdir -p "${ARTIFACTS_DIR}/quick"
 
+  # Deploy prompt once
+  mkdir -p "$(dirname "$PROMPT_DEST")"
+  cp "$PROMPT_SRC" "$PROMPT_DEST"
+
   local pids=()
   for fixture in "${FIXTURES[@]}"; do
     local artifact_prefix="${ARTIFACTS_DIR}/quick/${fixture}"
-    (
-      result=$(run_single "$fixture" 0 "$artifact_prefix")
-      echo "$result" > "${artifact_prefix}_result.txt"
-    ) &
+    run_single "$fixture" 0 "$artifact_prefix" &
     pids+=($!)
   done
 
@@ -579,9 +644,9 @@ run_quick_check() {
 # Main optimization loop: trial -> evaluate -> mutate -> repeat.
 
 run_loop() {
-  local best_score=0
-  local best_avg_iters=999
-  local best_commit=""
+  local best_score="${1:-0}"
+  local best_avg_iters="${2:-999}"
+  local best_commit="${3:-}"
   local consecutive_perfect=0
   local consecutive_no_improve=0
 
@@ -652,55 +717,63 @@ run_loop() {
       break
     fi
 
-    # e. Invoke mutator (unless last trial or stopping)
+    # e. Invoke mutator with up to 3 attempts, then stop if all fail
     if [[ $trial -lt $MAX_TRIALS ]]; then
-      invoke_mutator "$trial" "$score" "$best_score" "$best_commit"
+      local mutation_accepted=false
+      local max_mutation_attempts=3
+      local mutation_attempt=0
+      local diversity_hint=""
 
-      # f. Post-mutation sanity check
-      local line_count
-      line_count=$(wc -l < "$PROMPT_SRC" | tr -d ' ')
-      if [[ ! -s "$PROMPT_SRC" || "$line_count" -lt 2 ]]; then
-        warn "Post-mutation file is empty or too short (${line_count} lines) — restoring"
-        restore_prompt "$best_commit"
+      while [[ $mutation_attempt -lt $max_mutation_attempts ]]; do
+        mutation_attempt=$((mutation_attempt + 1))
+        log "Mutation attempt ${mutation_attempt}/${max_mutation_attempts}..."
 
-        # Retry mutation once
-        invoke_mutator "$trial" "$score" "$best_score" "$best_commit"
-        line_count=$(wc -l < "$PROMPT_SRC" | tr -d ' ')
-        if [[ ! -s "$PROMPT_SRC" || "$line_count" -lt 2 ]]; then
-          warn "Retry mutation also failed — keeping restored version"
-          restore_prompt "$best_commit"
+        # Invoke mutator
+        if ! invoke_mutator "$trial" "$score" "$best_score" "$best_commit" "$diversity_hint"; then
+          warn "Mutator failed to produce a change (attempt ${mutation_attempt})"
+          diversity_hint="IMPORTANT: Previous attempt failed to produce any change. You MUST edit the file. Read it, identify one specific improvement, and use the Edit tool."
+          continue
         fi
-      fi
 
-      # g. Quick-reject before committing mutation
-      local quick_score
-      quick_score=$(run_quick_check)
-      local quick_threshold=$(( best_score * 6 / 100 ))
-      if [[ "$quick_score" -lt "$quick_threshold" ]]; then
-        warn "Quick-reject: score ${quick_score} < threshold ${quick_threshold} — rejecting mutation"
-        # Save rejected diff
-        git -C "$REPO_ROOT" diff "${best_commit}" -- "$PROMPT_SRC" > "$FAILED_DIFFS_DIR/failed_$(date +%s).diff" 2>/dev/null || true
-        restore_prompt "$best_commit"
-
-        # Retry mutation once with diversity enforcement
-        invoke_mutator "$trial" "$score" "$best_score" "$best_commit"
-        line_count=$(wc -l < "$PROMPT_SRC" | tr -d ' ')
-        if [[ ! -s "$PROMPT_SRC" || "$line_count" -lt 2 ]]; then
+        # Validate mutation
+        if ! validate_mutation "$PROMPT_SRC" "$best_commit"; then
+          warn "Mutation failed validation (attempt ${mutation_attempt})"
+          git -C "$REPO_ROOT" diff "${best_commit}" -- "$PROMPT_SRC" > "$FAILED_DIFFS_DIR/rejected_$(date +%s).diff" 2>/dev/null || true
           restore_prompt "$best_commit"
-        else
-          quick_score=$(run_quick_check)
-          if [[ "$quick_score" -lt "$quick_threshold" ]]; then
-            warn "Quick-reject retry also failed (${quick_score} < ${quick_threshold}) — skipping mutation"
-            git -C "$REPO_ROOT" diff "${best_commit}" -- "$PROMPT_SRC" > "$FAILED_DIFFS_DIR/failed_$(date +%s).diff" 2>/dev/null || true
-            restore_prompt "$best_commit"
-            continue
-          fi
+          diversity_hint="IMPORTANT: Previous mutation was rejected by the reviewer. Try a different approach — focus on making the review process itself better, not just formatting."
+          continue
         fi
-      fi
 
-      # h. Commit mutation (only if we get here — not quick-rejected)
-      git -C "$REPO_ROOT" add "$PROMPT_SRC"
-      git -C "$REPO_ROOT" commit -m "autoresearch: trial ${trial} mutation" --allow-empty || true
+        # Quick-reject
+        local quick_score
+        quick_score=$(run_quick_check)
+        local quick_threshold=$(( best_score * 6 / 100 ))
+        if [[ "$quick_score" -lt "$quick_threshold" ]]; then
+          warn "Quick-reject: score ${quick_score} < threshold ${quick_threshold} (attempt ${mutation_attempt})"
+          git -C "$REPO_ROOT" diff "${best_commit}" -- "$PROMPT_SRC" > "$FAILED_DIFFS_DIR/failed_$(date +%s).diff" 2>/dev/null || true
+          restore_prompt "$best_commit"
+          diversity_hint="IMPORTANT: Previous mutation passed review but scored poorly in quick-check. Try a completely different approach."
+          continue
+        fi
+
+        # All checks passed
+        mutation_accepted=true
+        break
+      done
+
+      if [[ "$mutation_accepted" == "true" ]]; then
+        git -C "$REPO_ROOT" add "$PROMPT_SRC"
+        git -C "$REPO_ROOT" commit -m "autoresearch: trial ${trial} mutation" --allow-empty || true
+      else
+        log "All ${max_mutation_attempts} mutation attempts failed — cannot improve further"
+        log "========================================"
+        log "Optimization stopped: mutator exhausted"
+        log "Best score:          ${best_score}/120"
+        log "Best avg iterations: ${best_avg_iters}"
+        log "Best commit:         ${best_commit:-none}"
+        log "========================================"
+        break
+      fi
     fi
   done
 
@@ -725,10 +798,16 @@ main() {
       run_trial "${2:-1}" "${3:-manual}"
       ;;
     loop)
-      run_loop
+      run_loop "${2:-0}" "${3:-999}" "${4:-}"
+      ;;
+    resume)
+      # Usage: $0 resume <best_score> <best_commit>
+      [[ -n "${2:-}" && -n "${3:-}" ]] || die "Usage: $0 resume <best_score> <best_commit>"
+      log "Resuming from score ${2} at commit ${3}"
+      run_loop "$2" "999" "$3"
       ;;
     *)
-      echo "Usage: $0 {single|trial|loop} [args...]"
+      echo "Usage: $0 {single|trial|loop|resume} [args...]"
       exit 1
       ;;
   esac
