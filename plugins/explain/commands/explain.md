@@ -1,1 +1,1 @@
-Explain this to me in succinct, plain English
+Explain in succinct, plain English
