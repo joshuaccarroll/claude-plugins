@@ -16,7 +16,7 @@ Break the input into an ordered list of steps. Delimiters:
 
 Each step is one of three types:
 
-**Skill invocations** — prefixed with `/` (e.g., `/review-plan`, `/simplify`). Execute with the Skill tool. Pass any trailing arguments.
+**Skill invocations** — prefixed with `/` (e.g., `/review-plan`, `/simplify`, `/batch`, `/review`). Execute with the Skill tool. Pass any trailing arguments. Claude Code has many built-in commands beyond what appears in the available skills list — always invoke every `/command` via the Skill tool. Never pre-screen or skip a command because you don't recognize it.
 
 **Conditions** — phrases that gate subsequent steps: "if it converges", "if tests pass", "unless there are errors", "only if successful". Evaluate against the previous step's output.
 
@@ -44,22 +44,44 @@ Then proceed immediately unless the interpretation is clearly ambiguous. If genu
 
 ## 3. Execute Each Step
 
-Skill invocations are the most complex step type because the Skill tool loads another skill's instructions into the conversation. After that skill's work completes, you must return to this workflow and continue with the next step. To stay on track:
+**CRITICAL: You MUST execute ALL steps in the workflow. Never stop mid-workflow.** After every step completes — especially skill invocations — you MUST continue to the next step. A workflow is not done until the last step is complete. Stopping early is the single most important failure mode to avoid.
 
-- Before invoking a skill, note which step number you're on and what comes next
-- After a skill completes, explicitly pick up the workflow: "Step N complete. Continuing workflow — next is Step N+1: [description]"
-- Capture the key output from the completed skill (status codes, file paths, errors) since you'll need it for condition evaluation or context in later steps
+### Task tracking
+
+Before executing the first step, create a task for each step using `TaskCreate`. This gives you durable state that survives long-running skills:
+
+```
+TaskCreate: "Step 1: /review-plan" (status: in_progress)
+TaskCreate: "Step 2: If it converges" (status: pending)
+TaskCreate: "Step 3: /batch" (status: pending)
+...
+```
+
+Mark each task `done` as you complete it. After every step, use `TaskList` to see remaining tasks and continue with the next one.
+
+### Skill invocations
+
+Skill invocations are the most complex step type because the Skill tool loads another skill's instructions into the conversation. After that skill's work completes, you **must** return to this workflow and continue. To stay on track:
+
+1. **Before** invoking a skill, output: `--- WORKFLOW CHECKPOINT: After this skill completes, continue with Step N+1: [description] ---`
+2. **Invoke** the skill via the Skill tool
+3. **After** it completes, capture the key output (status codes, file paths, errors), then output: `--- Step N complete. Resuming workflow. ---`
+4. **Check** `TaskList` to confirm what's next, mark the completed task done, and proceed immediately
+
+### Step execution pattern
 
 For each step:
 
-**Announce**: `## Step N: [brief description]`
+**Announce**: `--- Step N of M: [brief description] ---`
 
 **Execute**:
 - Skills: invoke via the Skill tool with any arguments
 - Conditions: evaluate against the previous step's output (see Condition Evaluation below)
 - Actions: perform the task directly using available tools
 
-**Report**: brief outcome, then resume the workflow.
+**Report**: brief outcome + `TaskUpdate` to mark done, then immediately proceed to next step.
+
+**REMINDER: After every step, continue to the next. Do not stop. Do not wait for user input unless the step explicitly failed.**
 
 ## 4. Condition Evaluation
 
@@ -89,10 +111,16 @@ Carry results forward naturally. You don't need to serialize state — just use 
 
 ## 6. Failure Handling
 
-- **Skill not found**: report it, skip that step, continue (unless subsequent steps depend on it)
-- **Skill errors**: report the error, ask whether to continue or stop
+- **Skill invocation errors**: If the Skill tool returns an error when you invoke a `/command`, report the error and ask whether to continue or stop. Never skip a `/command` preemptively — always attempt it first via the Skill tool, since many commands are built-in to Claude Code and won't appear in any visible skills list.
 - **Condition not met**: skip gated steps, explain why, continue to ungated steps — this is expected behavior, not a failure
 - **Action fails**: report and ask whether to continue
+
+## 7. Plan Mode & Approval Steps
+
+**Never enter plan mode during workflow execution.** The `EnterPlanMode` and `ExitPlanMode` tools trigger an interactive approval UI in the harness that blocks the workflow and requires manual user intervention. Instead:
+
+- When a step involves planning: explore the codebase, design your approach, write the plan to a markdown file (using the Write tool), and present it inline. Then move to the next step.
+- When a step says "approve the plan" (or similar): treat it as an automatic continuation. The user defined the workflow with "approve" in it — that IS the approval. Confirm the plan looks complete and proceed immediately. Do not call `ExitPlanMode` and do not ask for user confirmation.
 
 ## Parse Examples
 
@@ -116,3 +144,20 @@ Carry results forward naturally. You don't need to serialize state — just use 
 | 4 | skill | /harmonize | — |
 
 Note: step 4 runs regardless — harmonize doesn't depend on whether simplify found issues.
+
+`Plan the migration -> approve the plan -> implement it -> /harmonize`
+
+| # | Type | Step | Gated by |
+|---|------|------|----------|
+| 1 | action | Plan the migration (write to file, no plan mode — see §7) | — |
+| 2 | action | Approve the plan (auto-continue — see §7) | — |
+| 3 | action | Implement it | — |
+| 4 | skill | /harmonize | — |
+
+Note: steps 1 and 2 follow section 7 rules — the plan is written to a file (never via plan mode) and approval is automatic.
+
+## 8. Never Stop Mid-Workflow
+
+This is the most important rule. After every step — especially after long-running skills like `/review-plan` or `/batch` that spawn sub-agents — you MUST check `TaskList` and continue to the next pending step. The workflow is only complete when all tasks are marked done (or explicitly skipped by a failed condition).
+
+Common failure mode: a skill like `/review-plan` runs for several minutes with multiple iterations. When it finishes, you may feel like you've "completed" something and stop. **Do not stop.** Check your task list and keep going.
