@@ -32,6 +32,15 @@
       },
       "source": "./plugins/review-plan",
       "category": "productivity"
+    },
+    {
+      "name": "custom-workflow",
+      "description": "Orchestrate multi-step workflows that chain skills and actions with conditional logic",
+      "author": {
+        "name": "Joshua Carroll"
+      },
+      "source": "./plugins/custom-workflow",
+      "category": "productivity"
     }
   ]
 }
