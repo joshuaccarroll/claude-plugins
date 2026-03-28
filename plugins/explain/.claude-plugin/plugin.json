@@ -1,6 +1,6 @@
 {
   "name": "explain",
-  "description": "Explains code or concepts in succinct, plain English",
+  "description": "Explain this to me in succinct, plain language",
   "author": {
     "name": "Joshua Carroll"
   }
