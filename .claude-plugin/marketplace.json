@@ -32,6 +32,15 @@
       },
       "source": "./plugins/review-plan",
       "category": "productivity"
+    },
+    {
+      "name": "workflow-orchestrator",
+      "description": "Create and execute structured YAML workflows with conditional logic, loops, parallel execution, and intelligent skill routing",
+      "author": {
+        "name": "Joshua Carroll"
+      },
+      "source": "./plugins/workflow-orchestrator",
+      "category": "productivity"
     }
   ]
 }
