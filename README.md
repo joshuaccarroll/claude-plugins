@@ -15,13 +15,15 @@ claude plugins install explain@joshuaccarroll-plugins
 claude plugins install workflow-orchestrator@joshuaccarroll-plugins
 ```
 
-## Plugins
+## Skills
 
-| Command | What it does |
+All plugins are implemented as skills — directly invocable via slash command (`/skill-name`) and also triggered contextually by Claude when relevant to your conversation.
+
+| Skill | What it does |
 |---|---|
 | `/review-plan` | Iteratively reviews a plan using sub-agents until convergence |
 | `/harmonize` | Harmonizes changed code with surrounding codebase patterns |
-| `/explain` | Explains code or concepts in succinct, plain English |
+| `/explain` | Explains code or concepts in succinct, plain language |
 | `/workflow-orchestrator` | Creates and executes structured YAML workflows |
 
 ### `/review-plan` — Plan Reviewer
@@ -36,7 +38,7 @@ Identifies recently changed code via git, discovers conventions from sibling fil
 
 ### `/explain` — Plain English Explainer
 
-Explains code or concepts in succinct, plain English. Pass it a file, function, concept, or question.
+Explains code or concepts in succinct, plain language. Pass it a file, function, concept, or question.
 
 ### `/workflow-orchestrator` — Workflow Orchestrator
 
@@ -63,7 +65,7 @@ Add a new plugin by creating a directory under `plugins/`:
 plugins/my-plugin/
 ├── .claude-plugin/
 │   └── plugin.json      # Plugin metadata (required)
-├── commands/             # Slash commands (optional)
-├── agents/               # Agent definitions (optional)
-└── skills/               # Skill/knowledge modules (optional)
+└── skills/
+    └── my-skill/
+        └── SKILL.md     # Skill definition (slash command + contextual trigger)
 ```
