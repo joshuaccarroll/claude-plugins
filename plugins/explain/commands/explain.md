@@ -1,1 +1,1 @@
-Explain in succinct, plain English
+In succinct, plain language, explain
