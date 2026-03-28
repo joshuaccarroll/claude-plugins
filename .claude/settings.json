@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command' | grep -q 'git commit' && git diff --cached --name-only 2>/dev/null | grep -q '^plugins/workflow-orchestrator/' && echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"STOP: You are about to commit changes that include files under plugins/workflow-orchestrator/. Before committing, you MUST:\\n1. Read the Mode 4: Help section in plugins/workflow-orchestrator/skills/workflow-orchestrator/SKILL.md\\n2. Run: git diff --cached -- plugins/workflow-orchestrator/\\n3. Compare the staged changes against the help guide content\\n4. If any changes affect commands, step types, YAML schema, expressions, error handling, or other user-facing behavior documented in the help guide, update the help section to match\\n5. Stage any help updates\\n6. Then proceed with the commit\"}}' || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
