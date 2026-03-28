@@ -28,8 +28,9 @@ Four modes:
 
 **Name resolution for `run`:**
 1. If the argument is a path ending in `.yaml`/`.yml`, use it directly.
-2. Otherwise look for `.claude/workflows/<name>.yaml`, then `.yml`.
-3. If not found, report the error and stop.
+2. Otherwise look for `.claude/workflows/<name>.yaml`, then `.yml` (project-local).
+3. If not found, look for `~/.claude/workflows/<name>.yaml`, then `.yml` (global).
+4. If not found, report the error and stop.
 
 ---
 
@@ -51,9 +52,14 @@ Read `references/schema.md` before generating any workflow YAML.
    - Yes: `run_in: agent` | No: `run_in: main`
    - Commands default to `run_in: main`
 
-6. **Generate YAML** -- Write to `.claude/workflows/<name>.yaml`. Valid YAML conforming to the schema. Add comments where helpful.
+6. **Choose Location** (interactive only) -- Ask the user where to save the workflow:
+   - **Local** (this project only): `.claude/workflows/<name>.yaml`
+   - **Global** (all projects): `~/.claude/workflows/<name>.yaml`
+   Non-interactive (`create-workflow` step): default to local.
 
-7. **Explain** -- Present: workflow name, file path, step count, step outline, assumptions, how to run it.
+7. **Generate YAML** -- Write to the chosen location. Valid YAML conforming to the schema. Add comments where helpful.
+
+8. **Explain** -- Present: workflow name, file path, scope (local/global), step count, step outline, assumptions, how to run it.
 
 ---
 
@@ -99,13 +105,16 @@ Read `references/execution.md` for the full validation checklist, step dispatch 
 
 ## Mode 3: List Workflows
 
-Scan `.claude/workflows/` for `.yaml`/`.yml` files. Parse each and present:
+Scan both `.claude/workflows/` (local) and `~/.claude/workflows/` (global) for `.yaml`/`.yml` files. Parse each and present:
 
-| Name | Description | File |
-|---|---|---|
-| example | Description... | .claude/workflows/example.yaml |
+| Name | Description | Scope | File |
+|---|---|---|---|
+| example | Description... | Local | .claude/workflows/example.yaml |
+| shared | Description... | Global | ~/.claude/workflows/shared.yaml |
 
-If none found, suggest `/workflow-orchestrator create`.
+If a workflow with the same name exists in both locations, show both and note the conflict. Local takes precedence at runtime.
+
+If none found in either location, suggest `/workflow-orchestrator create`.
 
 ---
 

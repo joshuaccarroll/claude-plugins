@@ -11,6 +11,7 @@ The workflow orchestrator lets you **save that entire sequence as a YAML file** 
 - **Repeatable** -- the same steps run the same way every time.
 - **Hands-free** -- long pipelines run without you babysitting each step.
 - **Shareable** -- drop a `.yaml` file in your repo and anyone with this skill can run it.
+- **Global or local** -- save workflows to a single project or make them available everywhere.
 - **Composable** -- workflows can call other workflows, run steps in parallel, branch on conditions, and loop until done.
 
 ---
@@ -23,7 +24,7 @@ The workflow orchestrator lets you **save that entire sequence as a YAML file** 
 /workflow-orchestrator create Plan a CLI tool, review the plan, build it, then explain what was built
 ```
 
-This generates a `.yaml` file in `.claude/workflows/` and shows you what it created.
+You'll be asked whether to save it **locally** (this project only) or **globally** (available in all projects).
 
 ### 2. Run it
 
@@ -39,7 +40,7 @@ That's it. The orchestrator walks through every step, tracks progress, and print
 /workflow-orchestrator list
 ```
 
-Lists all saved workflows with their names and descriptions.
+Lists all saved workflows (both local and global) with their names, scope, and descriptions.
 
 ---
 
@@ -49,7 +50,7 @@ Lists all saved workflows with their names and descriptions.
 |---|---|
 | `create <instructions>` | Turns your description into a YAML workflow file |
 | `run <name> [--vars key=value ...]` | Executes a saved workflow |
-| `list` | Shows all workflows in `.claude/workflows/` |
+| `list` | Shows all workflows (local and global) |
 | `help` | Prints this guide |
 
 **Shorthand:** You can often skip the subcommand. If your input looks like instructions, it creates. If it looks like a file name, it runs.
@@ -202,6 +203,19 @@ The orchestrator tries to be resilient:
 2. **Continue by default** -- after a failed retry, the step is marked `failed` but the workflow continues.
 3. **Hard stops are opt-in** -- use the `if` + `fail` pattern above to make a failure halt the workflow.
 4. **Full summary at the end** -- you always get a table showing every step's status, duration, and files modified.
+
+---
+
+## Local vs global workflows
+
+Workflows can live in two places:
+
+| Scope | Location | When to use |
+|---|---|---|
+| **Local** | `.claude/workflows/` (in your project) | Project-specific pipelines, shareable with teammates via git |
+| **Global** | `~/.claude/workflows/` (in your home directory) | Personal workflows you want available in every project |
+
+When you `create` a workflow, you'll be asked which scope to use. When you `run` a workflow by name, the orchestrator checks local first, then global. If both exist with the same name, local wins.
 
 ---
 
