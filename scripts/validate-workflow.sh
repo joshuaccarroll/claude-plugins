@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Validation script for the workflow-orchestrator plugin.
 # Checks YAML examples, JSON config files, the skill prompt, and cleanup state.
+# Uses Ruby for YAML parsing (built-in on macOS) and Python for JSON.
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PASS=0
@@ -34,74 +35,86 @@ else
   for f in "${yaml_files[@]}"; do
     base="$(basename "$f")"
 
-    # Single Python invocation: parse YAML once, run all checks
-    py_output=$(python3 - "$f" "$base" <<'PYEOF'
-import sys, yaml
+    # Single Ruby invocation: parse YAML once, run all checks
+    rb_output=$(ruby - "$f" "$base" <<'RUBYEOF'
+require 'yaml'
+require 'set'
+require 'date'
 
-path, base = sys.argv[1], sys.argv[2]
-VALID_TYPES = {"prompt", "skill", "command", "if", "switch", "loop", "parallel", "workflow", "create-workflow", "fail"}
-VALID_RUN_IN = {"main", "agent"}
-BRANCH_KEYS = ("then", "else", "steps", "branches")
+path, base = ARGV[0], ARGV[1]
+VALID_TYPES = %w[prompt skill command if switch loop parallel workflow create-workflow fail].to_set
+VALID_RUN_IN = %w[main agent].to_set
+BRANCH_KEYS = %w[then else steps branches]
 
-def visit_nested(step_list, visitor):
-    """Walk nested step structures, calling visitor(scope_steps) at each level."""
-    visitor(step_list or [])
-    for s in (step_list or []):
-        if not isinstance(s, dict):
-            continue
-        for key in BRANCH_KEYS:
-            nested = s.get(key)
-            if isinstance(nested, list):
-                visit_nested(nested, visitor)
-            elif isinstance(nested, dict):
-                for branch_steps in nested.values():
-                    if isinstance(branch_steps, list):
-                        visit_nested(branch_steps, visitor)
+def visit_nested(step_list, &visitor)
+  return unless step_list.is_a?(Array)
+  visitor.call(step_list)
+  step_list.each do |s|
+    next unless s.is_a?(Hash)
+    # Recurse into nested step lists
+    %w[then else steps].each do |key|
+      nested = s[key]
+      visit_nested(nested, &visitor) if nested.is_a?(Array)
+    end
+    # branches is a list of {steps: [...]} objects — unwrap each
+    if s["branches"].is_a?(Array)
+      s["branches"].each do |branch|
+        visit_nested(branch["steps"], &visitor) if branch.is_a?(Hash) && branch["steps"].is_a?(Array)
+      end
+    end
+    # cases is a map of value -> step list
+    if s["cases"].is_a?(Hash)
+      s["cases"].each_value do |case_steps|
+        visit_nested(case_steps, &visitor) if case_steps.is_a?(Array)
+      end
+    end
+    # default is a step list
+    visit_nested(s["default"], &visitor) if s["default"].is_a?(Array)
+  end
+end
 
-def p(ok, msg):
-    print(("PASS" if ok else "FAIL") + "\t" + msg)
+def p(ok, msg)
+  puts "#{ok ? 'PASS' : 'FAIL'}\t#{msg}"
+end
 
-try:
-    with open(path) as fh:
-        doc = yaml.safe_load(fh)
-    p(True, f"{base}: valid YAML")
-except Exception:
-    p(False, f"{base}: invalid YAML")
-    sys.exit(0)  # skip remaining checks for this file
+begin
+  doc = YAML.safe_load(File.read(path), permitted_classes: [Date])
+  p true, "#{base}: valid YAML"
+rescue => e
+  p false, "#{base}: invalid YAML"
+  exit 0
+end
 
-wf = doc.get("workflow") if isinstance(doc, dict) else None
-p(
-    wf and all(k in wf for k in ("name", "version", "steps")),
-    f"{base}: has required fields"
-)
+wf = doc.is_a?(Hash) ? doc["workflow"] : nil
+p(wf && %w[name version steps].all? { |k| wf.key?(k) }, "#{base}: has required fields")
 
-steps = wf.get("steps", []) if isinstance(wf, dict) else []
-all_have = all(isinstance(s, dict) and "id" in s and "type" in s for s in steps)
-if not steps:
-    p(False, f"{base}: no steps found")
-else:
-    p(all_have, f"{base}: all steps have id and type")
+steps = wf.is_a?(Hash) ? (wf["steps"] || []) : []
+if steps.empty?
+  p false, "#{base}: no steps found"
+else
+  all_have = steps.all? { |s| s.is_a?(Hash) && s.key?("id") && s.key?("type") }
+  p all_have, "#{base}: all steps have id and type"
+end
 
 # Collect all steps and check types + run_in
 all_steps = []
-visit_nested(steps, lambda scope: all_steps.extend(s for s in scope if isinstance(s, dict)))
+visit_nested(steps) { |scope| all_steps.concat(scope.select { |s| s.is_a?(Hash) }) }
 
-bad_types = [s.get("type") for s in all_steps if s.get("type") not in VALID_TYPES]
-p(not bad_types, f"{base}: all step types valid")
+bad_types = all_steps.select { |s| !VALID_TYPES.include?(s["type"]) }.map { |s| s["type"] }
+p bad_types.empty?, "#{base}: all step types valid"
 
-bad_run_in = [s["run_in"] for s in all_steps if "run_in" in s and s["run_in"] not in VALID_RUN_IN]
-p(not bad_run_in, f"{base}: run_in values valid")
+bad_run_in = all_steps.select { |s| s.key?("run_in") && !VALID_RUN_IN.include?(s["run_in"]) }.map { |s| s["run_in"] }
+p bad_run_in.empty?, "#{base}: run_in values valid"
 
 # Check duplicate IDs within each scope
-dupes = set()
-def find_scope_dupes(scope_steps):
-    ids = [s["id"] for s in scope_steps if isinstance(s, dict) and "id" in s]
-    seen = set()
-    for sid in ids:
-        (dupes if sid in seen else seen).add(sid)
-visit_nested(steps, find_scope_dupes)
-p(not dupes, f"{base}: no duplicate step IDs")
-PYEOF
+dupes = Set.new
+visit_nested(steps) do |scope_steps|
+  ids = scope_steps.select { |s| s.is_a?(Hash) && s.key?("id") }.map { |s| s["id"] }
+  seen = Set.new
+  ids.each { |sid| (seen.include?(sid) ? dupes : seen).add(sid) }
+end
+p dupes.empty?, "#{base}: no duplicate step IDs"
+RUBYEOF
     )
     while IFS=$'\t' read -r status msg; do
       if [ "$status" = "PASS" ]; then
@@ -109,7 +122,8 @@ PYEOF
       else
         fail "$msg"
       fi
-    done <<< "$py_output"
+    done <<< "$rb_output"
+  done
 fi
 
 echo ""
@@ -178,19 +192,15 @@ else
   pass "workflow-orchestrator.md: exists"
 
   # Frontmatter check
-  if python3 -c "
-import sys
-text = open(sys.argv[1]).read()
-assert text.startswith('---')
-parts = text.split('---', 2)
-assert len(parts) >= 3
-fm = parts[1]
-assert 'description' in fm.lower()
-assert 'model' in fm.lower()
-" "$SKILL_MD" 2>/dev/null; then
-    pass "workflow-orchestrator.md: has frontmatter with description and model"
+  if head -1 "$SKILL_MD" | grep -q '^---' && grep -c '^---' "$SKILL_MD" | grep -q '[2-9]'; then
+    fm=$(sed -n '2,/^---$/p' "$SKILL_MD")
+    if echo "$fm" | grep -qi 'description' && echo "$fm" | grep -qi 'model'; then
+      pass "workflow-orchestrator.md: has frontmatter with description and model"
+    else
+      fail "workflow-orchestrator.md: frontmatter missing description or model"
+    fi
   else
-    fail "workflow-orchestrator.md: missing or invalid frontmatter"
+    fail "workflow-orchestrator.md: missing frontmatter delimiters"
   fi
 
   # Line count
