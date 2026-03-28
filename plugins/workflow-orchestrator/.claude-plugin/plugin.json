@@ -1,0 +1,7 @@
+{
+  "name": "workflow-orchestrator",
+  "description": "Creates and executes structured YAML workflows that chain skills, commands, and prompts together",
+  "author": {
+    "name": "Joshua Carroll"
+  }
+}
