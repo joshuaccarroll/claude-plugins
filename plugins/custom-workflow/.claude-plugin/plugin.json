@@ -1,7 +1,0 @@
-{
-  "name": "custom-workflow",
-  "description": "Orchestrate multi-step workflows that chain skills and actions with conditional logic",
-  "author": {
-    "name": "Joshua Carroll"
-  }
-}
