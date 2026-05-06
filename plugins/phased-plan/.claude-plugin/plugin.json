@@ -1,0 +1,7 @@
+{
+  "name": "phased-plan",
+  "description": "Plan and execute work in vertical, independently-verifiable phases (skates → skateboard → bicycle → car)",
+  "author": {
+    "name": "Joshua Carroll"
+  }
+}

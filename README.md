@@ -13,6 +13,7 @@ claude plugins install review-plan@joshuaccarroll-plugins
 claude plugins install harmonize@joshuaccarroll-plugins
 claude plugins install explain@joshuaccarroll-plugins
 claude plugins install workflow-orchestrator@joshuaccarroll-plugins
+claude plugins install phased-plan@joshuaccarroll-plugins
 ```
 
 ## Skills
@@ -25,6 +26,8 @@ All plugins are implemented as skills — directly invocable via slash command (
 | `/harmonize` | Harmonizes changed code with surrounding codebase patterns |
 | `/explain` | Explains code or concepts in succinct, plain language |
 | `/workflow-orchestrator` | Creates and executes structured YAML workflows |
+| `/phased-plan` | Drafts a high-level, phased plan and saves it to `~/.claude/plans/` |
+| `/plan-phase` | Designs and implements one phase of a saved phased plan with TDD + adversarial verification |
 
 ### `/review-plan` — Plan Reviewer
 
@@ -56,6 +59,16 @@ Saves multi-step processes as YAML files and replays them with one command. Supp
 ```
 
 Workflows can be saved **locally** (`.claude/workflows/` — project-specific) or **globally** (`~/.claude/workflows/` — available in all projects). Run `/workflow-orchestrator help` for the full guide.
+
+### `/phased-plan` & `/plan-phase` — Phased Build Workflow
+
+A two-skill workflow for building anything in vertical, independently-verifiable phases (skates → skateboard → bicycle → car).
+
+1. `/phased-plan <concept>` drafts a high-level phased plan and saves it to `~/.claude/plans/<plan-name>.md`.
+2. After approving the plan, run `/clear` to start a fresh context, then `/plan-phase <plan-name> 1` to design and implement Phase 1 with TDD at the seams and adversarial-agent verification.
+3. Repeat with `/clear` between phases until the plan is done.
+
+Both skills are user-invocation only (`disable-model-invocation: true`) — Claude won't auto-trigger them mid-conversation.
 
 ## Contributing
 
