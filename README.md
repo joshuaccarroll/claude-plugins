@@ -29,7 +29,7 @@ All plugins are implemented as skills — directly invocable via slash command (
 | `/workflow-orchestrator` | Creates and executes structured YAML workflows |
 | `/phased-plan` | Drafts a high-level, phased plan and saves it to `~/.claude/plans/` |
 | `/plan-phase` | Designs and implements one phase of a saved phased plan with TDD + adversarial verification |
-| `/real-talk` | Switches responses to succinct, plain, casual language |
+| `/real-talk` | Responds in succinct, plain, casual language |
 
 ### `/review-plan` — Plan Reviewer
 
@@ -72,9 +72,9 @@ A two-skill workflow for building anything in vertical, independently-verifiable
 
 Both skills are user-invocation only (`disable-model-invocation: true`) — Claude won't auto-trigger them mid-conversation.
 
-### `/real-talk` — Plain Language Mode
+### `/real-talk` — Plain Language Responses
 
-Drops the assistant voice: short sentences, answer first, no preamble, no em-dashes, and no bold/bullets unless you actually asked for a list. Accuracy is unchanged; only the delivery gets simpler.
+Makes Claude respond in succinct, casual, plain language: short sentences, answer first, no preamble, no em-dashes, no formatting clutter. Plain doesn't mean vague — accuracy still matters.
 
 ## Contributing
 
