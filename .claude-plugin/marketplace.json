@@ -59,6 +59,15 @@
       },
       "source": "./plugins/phased-plan",
       "category": "productivity"
+    },
+    {
+      "name": "josh-slack-voice",
+      "description": "Drafts Slack messages in Joshua Carroll's writing voice, calibrated from his own edits to earlier drafts. Drafts only, never sends",
+      "author": {
+        "name": "Joshua Carroll"
+      },
+      "source": "./plugins/josh-slack-voice",
+      "category": "writing"
     }
   ]
 }

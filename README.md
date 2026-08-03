@@ -15,6 +15,7 @@ claude plugins install explain@joshuaccarroll-plugins
 claude plugins install workflow-orchestrator@joshuaccarroll-plugins
 claude plugins install phased-plan@joshuaccarroll-plugins
 claude plugins install real-talk@joshuaccarroll-plugins
+claude plugins install josh-slack-voice@joshuaccarroll-plugins
 ```
 
 ## Skills
@@ -30,6 +31,7 @@ All plugins are implemented as skills — directly invocable via slash command (
 | `/phased-plan` | Drafts a high-level, phased plan and saves it to `~/.claude/plans/` |
 | `/plan-phase` | Designs and implements one phase of a saved phased plan with TDD + adversarial verification |
 | `/real-talk` | Responds in succinct, plain, casual language |
+| `/josh-slack-voice` | Drafts Slack messages in Josh's writing voice (drafts only, never sends) |
 
 ### `/review-plan` — Plan Reviewer
 
@@ -75,6 +77,24 @@ Both skills are user-invocation only (`disable-model-invocation: true`) — Clau
 ### `/real-talk` — Plain Language Responses
 
 Makes Claude respond in succinct, casual, plain language: short sentences, answer first, no preamble, no em-dashes, no formatting clutter. Plain doesn't mean vague — accuracy still matters.
+
+### `/josh-slack-voice` — Personal Slack Voice
+
+Drafts Slack messages in Josh's own voice: his diction, structure, and length instincts. Triggers on "write this in my voice", "draft a Slack message", "make this sound like me", or pasting a rough draft to clean up. It always drafts into a fenced code block for copy/paste and flags what it assumed or invented — it never sends or schedules anything.
+
+This one is personal, so it won't be much use to you as-is. The transferable part is the architecture:
+
+| File | Loading | Contains |
+|---|---|---|
+| `SKILL.md` | always | Rules, forms, invariants, anti-patterns |
+| `references/edits.md` | always | Hand-rewrites of the skill's own drafts, strikethrough for cuts |
+| `references/corpus.md` | by section | Example messages grouped by register |
+
+`edits.md` does the heavy lifting. Rules derived from a corpus get the *register* right; watching what someone deletes from a draft gets the *voice* right. The corpus is split out and read by section rather than whole, which keeps per-invocation context around a third of what a single flat file cost.
+
+To fork it for yourself: replace the corpus with your own messages, then every time the skill produces something that isn't quite you, rewrite it by hand and add the before/after to `edits.md`. That feedback loop improved output more than any rule I wrote.
+
+Every situation, figure, vendor, tool, channel, and name in the reference files is invented. They're there to demonstrate sentence shape, not to describe anything real.
 
 ## Contributing
 
