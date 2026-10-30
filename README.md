@@ -15,7 +15,7 @@ claude plugins install explain@joshuaccarroll-plugins
 claude plugins install workflow-orchestrator@joshuaccarroll-plugins
 claude plugins install phased-plan@joshuaccarroll-plugins
 claude plugins install real-talk@joshuaccarroll-plugins
-claude plugins install josh-slack-voice@joshuaccarroll-plugins
+claude plugins install talk-like-me@joshuaccarroll-plugins
 ```
 
 ## Skills
@@ -31,7 +31,7 @@ All plugins are implemented as skills — directly invocable via slash command (
 | `/phased-plan` | Drafts a high-level, phased plan and saves it to `~/.claude/plans/` |
 | `/plan-phase` | Designs and implements one phase of a saved phased plan with TDD + adversarial verification |
 | `/real-talk` | Responds in succinct, plain, casual language |
-| `/josh-slack-voice` | Drafts Slack messages in Josh's writing voice (drafts only, never sends) |
+| `/talk-like-me` | Writes and responds in Josh's voice |
 
 ### `/review-plan` — Plan Reviewer
 
@@ -78,9 +78,11 @@ Both skills are user-invocation only (`disable-model-invocation: true`) — Clau
 
 Makes Claude respond in succinct, casual, plain language: short sentences, answer first, no preamble, no em-dashes, no formatting clutter. Plain doesn't mean vague — accuracy still matters.
 
-### `/josh-slack-voice` — Personal Slack Voice
+### `/talk-like-me` — Personal Voice
 
-Drafts Slack messages in Josh's own voice: his diction, structure, and length instincts. Triggers on "write this in my voice", "draft a Slack message", "make this sound like me", or pasting a rough draft to clean up. It always drafts into a fenced code block for copy/paste and flags what it assumed or invented — it never sends or schedules anything.
+Writes in Josh's own voice: his diction, tone, punctuation, and length instincts. Use it to have Claude answer you in your voice ("do X, and respond in my voice") or to draft something for someone else. Triggers on "talk like me", "respond in my voice", "make this sound like me", or pasting a rough draft to clean up. Text meant for someone else goes in a fenced code block with flags for what it assumed or invented; it never sends anything.
+
+The skill folder (`plugins/talk-like-me/skills/talk-like-me`) is self-contained, so you can zip it and upload it as a skill in Claude chat or Cowork.
 
 This one is personal, so it won't be much use to you as-is. The transferable part is the architecture:
 

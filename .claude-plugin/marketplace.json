@@ -61,12 +61,12 @@
       "category": "productivity"
     },
     {
-      "name": "josh-slack-voice",
-      "description": "Drafts Slack messages in Joshua Carroll's writing voice, calibrated from his own edits to earlier drafts. Drafts only, never sends",
+      "name": "talk-like-me",
+      "description": "Writes and responds in Joshua Carroll's voice, calibrated from his own edits to earlier drafts",
       "author": {
         "name": "Joshua Carroll"
       },
-      "source": "./plugins/josh-slack-voice",
+      "source": "./plugins/talk-like-me",
       "category": "writing"
     }
   ]

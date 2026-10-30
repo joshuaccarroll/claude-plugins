@@ -1,4 +1,6 @@
-# Corpus: Josh's Slack messages
+# Corpus: Josh's messages
+
+These come from Slack, so they're messages to coworkers. The voice applies anywhere.
 
 Excerpts trimmed to the voice-bearing parts. Read the section matching what you're drafting rather
 than the whole file. Annotations in *italics* name the move worth copying.
